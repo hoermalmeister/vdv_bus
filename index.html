@@ -2,7 +2,7 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV - Unikátní úseky</title>
+    <title>Mapa autobusů VDV</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -27,7 +27,7 @@
     <div id="loading">
         <div class="spinner"></div>
         <h2 id="loading-text">Načítání struktury linek...</h2>
-        <p>Hledám unikátní úseky mezi zastávkami pro zrychlení mapy.</p>
+        <p>Generuji optimalizovanou SVG mapu tras.</p>
     </div>
     <div id="map"></div>
 
@@ -39,7 +39,6 @@
     <script>
         const baseUrl = "https://hoermalmeister.github.io/gtfs-rehost/vdv/";
 
-        // Barevná paleta pro linky
         const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075'];
 
         function loadCSV(file) {
@@ -54,14 +53,13 @@
             });
         }
 
-        // Pomocná funkce pro vygenerování stálé barvy a posunu pro linku
         function getGroupStyle(group) {
             let hash = 0;
             for (let i = 0; i < group.length; i++) {
                 hash = group.charCodeAt(i) + ((hash << 5) - hash);
             }
             const absHash = Math.abs(hash);
-            const offsets = [-8, -5, -2, 1, 4, 7]; // Trochu širší rozestupy pro lepší čitelnost
+            const offsets = [-8, -5, -2, 1, 4, 7]; // Odsazení v pixelech
             return {
                 color: colors[absHash % colors.length],
                 offset: offsets[absHash % offsets.length]
@@ -123,7 +121,7 @@
                     });
                 });
 
-                loadingText.innerText = "Rozklad tras na unikátní úseky...";
+                loadingText.innerText = "Skládání chytré sítě úseků...";
 
                 const groupSegments = {}; 
                 const usedStops = new Set();
@@ -151,39 +149,44 @@
                     }
                 });
 
-                // Inicializace mapy s Canvas renderováním
-                const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
+                // Inicializace mapy (ZÁMĚRNĚ BEZ preferCanvas, aby fungoval plugin)
+                const map = L.map('map').setView([49.4, 15.6], 9); 
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                     attribution: '© OpenStreetMap',
                     maxZoom: 19
                 }).addTo(map);
 
-                // VYKRESLENÍ SEGMENTŮ (Opraveno na samostatné čáry)
+                // VYKRESLENÍ SEGMENTŮ jako MultiPolyline (Výrazně šetří výkon SVG)
                 Object.keys(groupSegments).forEach(group => {
                     const style = getGroupStyle(group);
                     const segmentsArray = Array.from(groupSegments[group]);
+                    const multiLatLngs = [];
                     
                     segmentsArray.forEach(segKey => {
                         const [id1, id2] = segKey.split('|');
                         const stop1 = stopsMap[id1];
                         const stop2 = stopsMap[id2];
                         
-                        // Zkontrolujeme, že zastávky existují a mají platné souřadnice
                         if (stop1 && stop2 && !isNaN(stop1.lat) && !isNaN(stop1.lon) && !isNaN(stop2.lat) && !isNaN(stop2.lon)) {
-                            // Vytvoříme samostatnou polyline pro každý unikátní úsek
-                            L.polyline([
+                            // Zabalíme úsek do pole
+                            multiLatLngs.push([
                                 [stop1.lat, stop1.lon],
                                 [stop2.lat, stop2.lon]
-                            ], {
-                                color: style.color,
-                                weight: 3,
-                                opacity: 0.8,
-                                offset: style.offset, // Plugin nyní dostane vždy jednoduchou čáru
-                                lineCap: 'round',
-                                lineJoin: 'round'
-                            }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
+                            ]);
                         }
                     });
+
+                    // Vykreslíme všechny úseky jedné linky naraz!
+                    if (multiLatLngs.length > 0) {
+                        L.polyline(multiLatLngs, {
+                            color: style.color,
+                            weight: 3,
+                            opacity: 0.8,
+                            offset: style.offset, // Plugin si s tím v SVG už poradí
+                            lineCap: 'round',
+                            lineJoin: 'round'
+                        }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
+                    }
                 });
 
                 // Vrstva zastávek
