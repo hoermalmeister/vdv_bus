@@ -42,12 +42,12 @@ stop_times['next_stop'] = stop_times.groupby('trip_id')['base_stop'].shift(-1)
 
 segments = stop_times.dropna(subset=['next_stop']).copy()
 
-# Kanonický pár zastávek (vždy menší ID jako první), aby všechny linky jely stejným směrem
+# Kanonický pár zastávek - OPRAVA: POUŽITO @@@
 segments['canonical_pair'] = segments.apply(
-    lambda r: f"{min(r['base_stop'], r['next_stop'])}|{max(r['base_stop'], r['next_stop'])}", axis=1
+    lambda r: f"{min(r['base_stop'], r['next_stop'])}@@@{max(r['base_stop'], r['next_stop'])}", axis=1
 )
 
-# Mapa: Které linky (skupiny) projíždí tímto konkrétním úsekem mezi 2 zastávkami
+# Mapa: Které linky (skupiny) projíždí tímto konkrétním úsekem
 pair_groups = segments.groupby('canonical_pair')['group'].apply(lambda x: sorted(list(set(x)))).to_dict()
 
 osrm_cache = {}
@@ -63,7 +63,8 @@ for i, pair_id in enumerate(pair_groups.keys(), 1):
     if i % 100 == 0: print(f"Zpracováno {i}/{total_pairs} úseků...")
     if pair_id in osrm_cache: continue
     
-    s1, s2 = pair_id.split('|')
+    # OPRAVA: ZDE TAKÉ @@@
+    s1, s2 = pair_id.split('@@@')
     if s1 not in stops_clean.index or s2 not in stops_clean.index: continue
     
     lon1, lat1 = stops_clean.loc[s1, 'stop_lon'], stops_clean.loc[s1, 'stop_lat']
