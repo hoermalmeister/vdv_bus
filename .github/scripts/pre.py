@@ -39,7 +39,7 @@ stop_times.sort_values(by=['trip_id', 'stop_sequence'], inplace=True)
 stop_times['next_stop'] = stop_times.groupby('trip_id')['base_stop'].shift(-1)
 
 # Filtrování na unikátní páry
-segments = stop_times.dropna(subset=['next_stop'])
+segments = stop_times.dropna(subset=['next_stop']).copy()
 # Uspořádání AB / BA deduplikace
 segments['seg_id'] = segments.apply(
     lambda r: f"{min(r['base_stop'], r['next_stop'])}|{max(r['base_stop'], r['next_stop'])}", axis=1
