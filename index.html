@@ -2,8 +2,9 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV</title>
+    <title>Mapa autobusů VDV - Všechny varianty</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; }
@@ -26,16 +27,21 @@
     <div id="loading">
         <div class="spinner"></div>
         <h2 id="loading-text">Načítání struktury linek...</h2>
+        <p>Zpracování všech variant tras může chvíli trvat.</p>
     </div>
     <div id="map"></div>
 
+    <!-- Knihovny pro mapu, posun čar (offset) a parsování -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-polylineoffset@1.1.1/leaflet.polylineoffset.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 
     <script>
         const baseUrl = "https://hoermalmeister.github.io/gtfs-rehost/vdv/";
 
-        // Pomocná funkce pro stahování CSV
+        // Barevná paleta pro linky
+        const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075'];
+
         function loadCSV(file) {
             return new Promise((resolve, reject) => {
                 Papa.parse(baseUrl + file, {
@@ -46,6 +52,21 @@
                     error: reject
                 });
             });
+        }
+
+        // Pomocná funkce, která pro název linky vygeneruje vždy stejnou barvu a odsazení (offset)
+        function getGroupStyle(group) {
+            let hash = 0;
+            for (let i = 0; i < group.length; i++) {
+                hash = group.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const absHash = Math.abs(hash);
+            // Výpočet odsazení: rozprostřeme linky od -6 do +6 pixelů
+            const offsets = [-6, -4, -2, 0, 2, 4, 6];
+            return {
+                color: colors[absHash % colors.length],
+                offset: offsets[absHash % offsets.length]
+            };
         }
 
         async function initMap() {
@@ -67,10 +88,10 @@
                 });
 
                 // 3. Seskupení linek dle posledních 3 čísel
-                const routesMap = {}; // route_id -> group
+                const routesMap = {}; 
                 routes.forEach(r => {
                     let name = r.route_short_name ? r.route_short_name.toString().trim() : "";
-                    let group = name.slice(-3); // Poslední tři znaky
+                    let group = name.slice(-3);
                     if(group) {
                         routesMap[r.route_id] = { group, originalName: name };
                     }
@@ -84,9 +105,9 @@
                     }
                 });
 
-                // 5. Streamované načítání stop_times (aby nedošlo k zamrznutí prohlížeče)
-                loadingText.innerText = "Zpracování jízdních řádů (skládám tvary tras)...";
-                const tripStops = {}; // trip_id -> pole zastávek
+                // 5. Streamované načítání stop_times
+                loadingText.innerText = "Skládám všechny varianty tras...";
+                const tripStops = {}; 
 
                 await new Promise((resolve, reject) => {
                     Papa.parse(baseUrl + "stop_times.txt", {
@@ -95,7 +116,6 @@
                         skipEmptyLines: true,
                         step: function(row) {
                             const st = row.data;
-                            // Uchováváme pouze spoje, které umíme přiřadit lince
                             if (st.trip_id && tripToGroupMap[st.trip_id]) {
                                 if (!tripStops[st.trip_id]) tripStops[st.trip_id] = [];
                                 tripStops[st.trip_id].push({
@@ -109,43 +129,50 @@
                     });
                 });
 
-                loadingText.innerText = "Vykreslování mapy...";
+                loadingText.innerText = "Vykreslování mapy (filtrace duplicitních tvarů)...";
 
-                // 6. Filtrace: Najdeme nejdelší spoj pro každou skupinu (abychom zamezili nepřehledným překryvům)
-                const longestTripPerGroup = {}; 
+                // 6. Filtrace: Najdeme všechny UNIKÁTNÍ tvary tras pro každou skupinu
+                // Pokud jede linka 10x denně po absolutně stejných zastávkách, vykreslíme ji jen jednou.
+                const uniqueRouteShapes = []; 
+                const shapeHashesPerGroup = {}; // group -> set(hashes)
+
                 Object.keys(tripStops).forEach(trip_id => {
                     const group = tripToGroupMap[trip_id];
-                    if (!longestTripPerGroup[group]) {
-                        longestTripPerGroup[group] = trip_id;
-                    } else {
-                        const currentLongest = longestTripPerGroup[group];
-                        if (tripStops[trip_id].length > tripStops[currentLongest].length) {
-                            longestTripPerGroup[group] = trip_id;
-                        }
+                    const stopsList = tripStops[trip_id];
+                    
+                    // Seřadit podle času/sekvence
+                    stopsList.sort((a, b) => a.seq - b.seq);
+                    
+                    // Vytvoříme otisk ("hash") tvaru trasy z IDček zastávek
+                    const shapeHash = stopsList.map(st => st.stop_id).join('|');
+
+                    if (!shapeHashesPerGroup[group]) {
+                        shapeHashesPerGroup[group] = new Set();
+                    }
+
+                    // Pokud jsme tuto přesnou variantu pro tuto linku ještě neviděli, uložíme ji
+                    if (!shapeHashesPerGroup[group].has(shapeHash)) {
+                        shapeHashesPerGroup[group].add(shapeHash);
+                        uniqueRouteShapes.push({
+                            group: group,
+                            stops: stopsList
+                        });
                     }
                 });
 
-                // 7. Inicializace mapy (střed přibližně Kraj Vysočina)
+                // 7. Inicializace mapy
                 const map = L.map('map').setView([49.4, 15.6], 9); 
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                     attribution: '© OpenStreetMap',
                     maxZoom: 19
                 }).addTo(map);
 
-                const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324'];
-                let colorIndex = 0;
-                const usedStops = new Set(); // Množina zastávek, které se opravdu použily
+                const usedStops = new Set();
 
-                // Vykreslení čar
-                Object.keys(longestTripPerGroup).forEach(group => {
-                    const trip_id = longestTripPerGroup[group];
-                    const stopsList = tripStops[trip_id];
-                    
-                    // Nutné seřadit podle sekvence!
-                    stopsList.sort((a, b) => a.seq - b.seq);
-
+                // 8. Vykreslení všech unikátních variant
+                uniqueRouteShapes.forEach(shape => {
                     const latlngs = [];
-                    stopsList.forEach(st => {
+                    shape.stops.forEach(st => {
                         const stop = stopsMap[st.stop_id];
                         if (stop && !isNaN(stop.lat) && !isNaN(stop.lon)) {
                             latlngs.push([stop.lat, stop.lon]);
@@ -153,24 +180,25 @@
                         }
                     });
 
-                    if (latlngs.length > 0) {
-                        const color = colors[colorIndex % colors.length];
-                        colorIndex++;
+                    if (latlngs.length > 1) {
+                        const style = getGroupStyle(shape.group);
 
+                        // Použití offsetu z pluginu
                         L.polyline(latlngs, {
-                            color: color,
+                            color: style.color,
                             weight: 3,
-                            opacity: 0.8
-                        }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
+                            opacity: 0.8,
+                            offset: style.offset // Toto roztáhne linky vedle sebe!
+                        }).bindTooltip(`Linka: ${shape.group}`, { sticky: true }).addTo(map);
                     }
                 });
 
-                // 8. Vrstva zastávek (objeví se pouze při blízkém zoomu)
+                // 9. Vrstva zastávek (objeví se pouze při blízkém zoomu 14+)
                 const stopsLayer = L.layerGroup();
                 usedStops.forEach(stop_id => {
                     const stop = stopsMap[stop_id];
                     L.circleMarker([stop.lat, stop.lon], {
-                        radius: 5,
+                        radius: 4,
                         color: '#000',
                         weight: 1,
                         fillColor: '#fff',
@@ -178,9 +206,7 @@
                     }).bindTooltip(stop.name).addTo(stopsLayer);
                 });
 
-                // Zachycení události zoomu
                 map.on('zoomend', function() {
-                    // 14 je celkem blízký zoom pro detaily ulic a obcí
                     if (map.getZoom() >= 14) {
                         if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
                     } else {
@@ -188,12 +214,12 @@
                     }
                 });
 
-                // Skrytí načítací obrazovky
+                // Konec - skrytí načítání
                 document.getElementById('loading').style.display = 'none';
 
             } catch (error) {
                 console.error("Chyba:", error);
-                document.getElementById('loading-text').innerText = "Vyskytla se chyba při zpracování. Zkontroluj F12 konzoli.";
+                document.getElementById('loading-text').innerText = "Vyskytla se chyba při zpracování. Zkontroluj konzoli prohlížeče (F12).";
             }
         }
 
