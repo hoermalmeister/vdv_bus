@@ -33,39 +33,37 @@ route_group_map = routes.set_index('route_id')['group'].to_dict()
 trips['group'] = trips['route_id'].map(route_group_map)
 trip_group_map = trips.set_index('trip_id')['group'].dropna().to_dict()
 
-print("Sestavuji tvary spojů...")
+print("Sestavuji síť úseků...")
 stop_times['group'] = stop_times['trip_id'].map(trip_group_map)
 stop_times = stop_times.dropna(subset=['group', 'stop_id'])
 stop_times['base_stop'] = stop_times['stop_id'].astype(str).apply(lambda x: x.split('.')[0])
 stop_times.sort_values(by=['trip_id', 'stop_sequence'], inplace=True)
+stop_times['next_stop'] = stop_times.groupby('trip_id')['base_stop'].shift(-1)
 
-# Sestavíme unikátní sekvence zastávek pro každou linku
-trip_shapes = stop_times.groupby('trip_id')['base_stop'].apply(tuple).reset_index()
-trip_shapes['group'] = trip_shapes['trip_id'].map(trip_group_map)
-unique_shapes = trip_shapes.drop_duplicates(subset=['group', 'base_stop'])
+segments = stop_times.dropna(subset=['next_stop']).copy()
 
-# Příprava hran pro OSRM (ZMĚNĚNO NA @@@ ABY SE TO NEBILO S ID ZASTÁVEK)
-edges_to_route = set()
-for seq in unique_shapes['base_stop']:
-    for i in range(len(seq) - 1):
-        edges_to_route.add(f"{seq[i]}@@@{seq[i+1]}")
+# Kanonický pár zastávek (vždy menší ID jako první), aby všechny linky jely stejným směrem
+segments['canonical_pair'] = segments.apply(
+    lambda r: f"{min(r['base_stop'], r['next_stop'])}|{max(r['base_stop'], r['next_stop'])}", axis=1
+)
+
+# Mapa: Které linky (skupiny) projíždí tímto konkrétním úsekem mezi 2 zastávkami
+pair_groups = segments.groupby('canonical_pair')['group'].apply(lambda x: sorted(list(set(x)))).to_dict()
 
 osrm_cache = {}
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r", encoding="utf-8") as f:
         osrm_cache = json.load(f)
 
-print("Fáze 1: Routování směrových úseků...")
+print("Fáze 1: Routování mezizastávkových úseků přes OSRM...")
 api_calls = 0
-total_edges = len(edges_to_route)
+total_pairs = len(pair_groups)
 
-for i, edge in enumerate(edges_to_route, 1):
-    if i % 200 == 0: print(f"Zpracováno {i}/{total_edges} hran...")
-    if edge in osrm_cache: continue
+for i, pair_id in enumerate(pair_groups.keys(), 1):
+    if i % 100 == 0: print(f"Zpracováno {i}/{total_pairs} úseků...")
+    if pair_id in osrm_cache: continue
     
-    # ZDE OPRAVENO ROZDĚLOVÁNÍ
-    s1, s2 = edge.split('@@@')
-    
+    s1, s2 = pair_id.split('|')
     if s1 not in stops_clean.index or s2 not in stops_clean.index: continue
     
     lon1, lat1 = stops_clean.loc[s1, 'stop_lon'], stops_clean.loc[s1, 'stop_lat']
@@ -80,81 +78,63 @@ for i, edge in enumerate(edges_to_route, 1):
         res = requests.get(url, timeout=5)
         data = res.json()
         if data.get('code') == 'Ok':
-            osrm_cache[edge] = data['routes'][0]['geometry']['coordinates']
+            osrm_cache[pair_id] = data['routes'][0]['geometry']['coordinates']
         else:
-            osrm_cache[edge] = [[lon1, lat1], [lon2, lat2]]
+            osrm_cache[pair_id] = [[lon1, lat1], [lon2, lat2]]
         time.sleep(0.15)
     except Exception:
-        osrm_cache[edge] = [[lon1, lat1], [lon2, lat2]]
+        osrm_cache[pair_id] = [[lon1, lat1], [lon2, lat2]]
         time.sleep(0.5)
 
 if api_calls > 0:
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(osrm_cache, f, ensure_ascii=False, allow_nan=False)
 
-print("Fáze 2: Spojování do kontinuálních čar a aplikace offsetu...")
+print("Fáze 2: Výpočet paralelních offsetů...")
 group_features = {}
 
-for _, row in unique_shapes.iterrows():
-    group = row['group']
-    seq = row['base_stop']
+for pair_id, groups in pair_groups.items():
+    if pair_id not in osrm_cache: continue
     
-    full_coords = []
+    coords = osrm_cache[pair_id]
+    clean_coords = [[lon, lat] for lon, lat in coords if pd.notna(lon) and pd.notna(lat)]
+    if len(clean_coords) < 2: continue
     
-    # Lepení úseků do jedné obří souvislé cesty
-    for i in range(len(seq) - 1):
-        edge = f"{seq[i]}@@@{seq[i+1]}"
-        if edge in osrm_cache:
-            clean_geom = [[lon, lat] for lon, lat in osrm_cache[edge] if pd.notna(lon) and pd.notna(lat)]
-            if not clean_geom: continue
-                
-            if not full_coords:
-                full_coords.extend(clean_geom)
-            else:
-                # Vyhneme se duplikaci spojovacího bodu
-                if full_coords[-1] == clean_geom[0]:
-                    full_coords.extend(clean_geom[1:])
-                else:
-                    full_coords.extend(clean_geom)
-
-    if len(full_coords) >= 2:
-        try:
-            # Převod na metry
-            lat_mid = full_coords[0][1]
-            lon_scale = math.cos(math.radians(lat_mid))
-            m_coords = [(lon * 111320 * lon_scale, lat * 111320) for lon, lat in full_coords]
-            
-            line = LineString(m_coords)
-            
-            # Pevný offset pro konkrétní linku (-40, -20, 0, 20, 40 metrů)
-            hash_val = sum(ord(c) for c in str(group))
-            offsets = [-40, -20, 0, 20, 40]
-            offset_meters = offsets[hash_val % len(offsets)]
-            
-            if offset_meters != 0:
-                # join_style=1 ZAOBÁLÍ ROHY a zabrání bodákům a špičkám!
+    # Převod geometrie na metry
+    lat_mid = clean_coords[0][1]
+    lon_scale = math.cos(math.radians(lat_mid))
+    m_coords = [(lon * 111320 * lon_scale, lat * 111320) for lon, lat in clean_coords]
+    line = LineString(m_coords)
+    
+    num_groups = len(groups)
+    
+    for idx, group in enumerate(groups):
+        # Dynamický posun - linky se rozestoupí přesně podle toho, kolik jich tu reálně jede
+        offset_multiplier = idx - (num_groups - 1) / 2.0
+        offset_meters = offset_multiplier * 20 # 20 metrů mezera mezi linkami
+        
+        if offset_meters == 0:
+            out_coords = m_coords
+        else:
+            try:
+                # Aplikace posunu na tento krátký a hladký úsek. join_style=1 krásně vyhladí rohy
                 off_line = line.offset_curve(offset_meters, join_style=1)
-                
                 if off_line.geom_type == 'LineString':
                     out_coords = list(off_line.coords)
                 elif off_line.geom_type == 'MultiLineString':
                     out_coords = []
-                    for part in off_line.geoms:
-                        out_coords.extend(list(part.coords))
+                    for part in off_line.geoms: out_coords.extend(list(part.coords))
                 else:
                     out_coords = m_coords
-            else:
+            except Exception:
                 out_coords = m_coords
                 
-            # Převod zpět na GPS souřadnice
-            final_coords = [[round(x / (111320 * lon_scale), 5), round(y / 111320, 5)] for x, y in out_coords]
-            
-            if group not in group_features:
-                group_features[group] = []
-            group_features[group].append(final_coords)
-            
-        except Exception:
-            pass
+        # Převod zpět z metrů na GPS
+        final_coords = [[round(x / (111320 * lon_scale), 5), round(y / 111320, 5)] for x, y in out_coords]
+        
+        if group not in group_features:
+            group_features[group] = []
+        group_features[group].append(final_coords)
 
 features = []
 for group, lines in group_features.items():
@@ -164,6 +144,7 @@ for group, lines in group_features.items():
         "geometry": { "type": "MultiLineString", "coordinates": lines }
     })
 
+# Zastávky (pouze ty, co mají smysl)
 for idx, row in stops_clean.iterrows():
     features.append({
         "type": "Feature",
@@ -177,7 +158,7 @@ for idx, row in stops_clean.iterrows():
 
 geojson_obj = { "type": "FeatureCollection", "features": features }
 
-print("Generuji hladké trasy.geojson...")
+print("Generuji čistý trasy.geojson...")
 with open("trasy.geojson", "w", encoding="utf-8") as f:
     json.dump(geojson_obj, f, ensure_ascii=False, allow_nan=False)
 
