@@ -2,272 +2,97 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV - Opravená čistá verze</title>
+    <title>Mapa autobusů VDV - GeoJSON verze</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; }
         #map { width: 100%; height: 100%; }
         #loading {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(255, 255, 255, 0.9); z-index: 9999;
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            font-family: sans-serif; text-align: center; padding: 20px;
+            position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.9); padding: 10px 20px;
+            border-radius: 8px; z-index: 9999; font-family: sans-serif; font-weight: bold;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
         }
-        .spinner {
-            border: 8px solid #f3f3f3; border-top: 8px solid #3498db;
-            border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite;
-            margin-bottom: 20px;
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
-    <div id="loading">
-        <div class="spinner"></div>
-        <h2 id="loading-text">Skládám čistou síť VDV...</h2>
-    </div>
-
+    <div id="loading">Načítání trasy.geojson...</div>
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 
     <script>
-        const baseUrl = "https://hoermalmeister.github.io/gtfs-rehost/vdv/";
+        // Inicializace mapy s nejrychlejším renderováním
+        const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap',
+            maxZoom: 19
+        }).addTo(map);
+
         const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075'];
 
-        function loadCSV(file) {
-            return new Promise((resolve, reject) => {
-                Papa.parse(baseUrl + file, {
-                    download: true,
-                    header: true,
-                    skipEmptyLines: true,
-                    delimiter: ",",
-                    complete: results => resolve(results.data),
-                    error: () => reject(new Error(`Nelze načíst ${file}`))
-                });
-            });
-        }
-
-        function cleanRow(row) {
-            const cleaned = {};
-            for (let key in row) {
-                if (!key) continue;
-                const cleanKey = key.trim().replace(/^\uFEFF/, '').replace(/^["']|["']$/g, '');
-                let val = row[key];
-                if (typeof val === 'string') val = val.trim().replace(/^["']|["']$/g, '');
-                cleaned[cleanKey] = val;
-            }
-            return cleaned;
-        }
-
-        // Posun souběžných linek vedle sebe + Bezpečnostní pojistka vzdálenosti
-        function offsetSegment(lat1, lon1, lat2, lon2, offsetMeters) {
-            if (offsetMeters === 0) return [[lat1, lon1], [lat2, lon2]];
-            
-            const meterToLat = 1 / 111320; 
-            const latMid = (lat1 + lat2) / 2;
-            const cosLat = Math.cos(latMid * Math.PI / 180);
-            
-            const dy = (lat2 - lat1) / meterToLat;
-            const dx = (lon2 - lon1) * cosLat / meterToLat;
-            const distMeters = Math.sqrt(dx*dx + dy*dy);
-            
-            // Pojistka proti "pavučinám" - pokud je skok mezi zastávkami větší než 80 km, čáru zrušíme
-            if (distMeters > 80000) return null; 
-            if (distMeters === 0) return [[lat1, lon1], [lat2, lon2]];
-            
-            const nx = -dy / distMeters;
-            const ny = dx / distMeters;
-            
-            const dLat = ny * offsetMeters * meterToLat;
-            const dLon = (nx * offsetMeters * meterToLat) / cosLat;
-            
-            return [ [lat1 + dLat, lon1 + dLon], [lat2 + dLat, lon2 + dLon] ];
-        }
-
-        function getGroupStyle(group) {
+        function getColorForGroup(group) {
             let hash = 0;
             for (let i = 0; i < group.length; i++) hash = group.charCodeAt(i) + ((hash << 5) - hash);
-            const absHash = Math.abs(hash);
-            const offsets = [-90, -60, -30, 0, 30, 60, 90]; // Rozestupy linek
-            return {
-                color: colors[absHash % colors.length],
-                offsetMeters: offsets[absHash % offsets.length]
-            };
+            return colors[Math.abs(hash) % colors.length];
         }
 
-        async function initMap() {
-            try {
-                const [rawRoutes, rawTrips, rawStops] = await Promise.all([
-                    loadCSV("routes.txt"),
-                    loadCSV("trips.txt"),
-                    loadCSV("stops.txt")
-                ]);
+        // Vrstvy
+        const linesLayer = L.layerGroup().addTo(map);
+        const stopsLayer = L.layerGroup();
 
-                const stopsMap = {};
-                const baseStopsMap = {}; // Pro přesné spojení bez nástupišť
-
-                // 1. Zastávky
-                rawStops.forEach(row => {
-                    const s = cleanRow(row);
-                    if (s.stop_id && s.stop_lat && s.stop_lon) {
-                        let lat = parseFloat(s.stop_lat.replace(',','.'));
-                        let lon = parseFloat(s.stop_lon.replace(',','.'));
-                        
-                        if (!isNaN(lat) && !isNaN(lon)) {
-                            const stopData = { lat: lat, lon: lon, name: s.stop_name };
-                            stopsMap[s.stop_id] = stopData;
-                            
-                            // Bezpečné oříznutí: CISJR:10001|CRZ:23441.P1.ZV182 -> CISJR:10001|CRZ:23441
-                            const baseId = s.stop_id.split('.')[0]; 
-                            if (baseId) baseStopsMap[baseId] = stopData;
-                        }
-                    }
-                });
-
-                // Spolehlivé získání zastávky bez šíleného prohledávání
-                function getStopSafe(id) {
-                    if (!id) return null;
-                    if (stopsMap[id]) return stopsMap[id];
-                    const baseId = id.split('.')[0];
-                    if (baseStopsMap[baseId]) return baseStopsMap[baseId];
-                    return null;
-                }
-
-                // 2. Linky
-                const routesMap = {}; 
-                rawRoutes.forEach(row => {
-                    const r = cleanRow(row);
-                    if (!r.route_id) return;
-                    let name = r.route_short_name || r.route_long_name || "";
-                    let group = name.toString().trim().slice(-3); // Seskupení dle 3 posledních znaků
-                    if(group) routesMap[r.route_id] = { group, originalName: name };
-                });
-
-                // 3. Spoje
-                const tripToGroupMap = {};
-                rawTrips.forEach(row => {
-                    const t = cleanRow(row);
-                    if (t.trip_id && t.route_id && routesMap[t.route_id]) {
-                        tripToGroupMap[t.trip_id] = routesMap[t.route_id].group;
-                    }
-                });
-
-                // 4. Parsování časů
-                const tripStops = {}; 
-                let seqFallback = 0; // Kdyby náhodou chybělo stop_sequence
-
-                await new Promise((resolve, reject) => {
-                    Papa.parse(baseUrl + "stop_times.txt", {
-                        download: true,
-                        header: true,
-                        skipEmptyLines: true,
-                        delimiter: ",",
-                        step: function(row) {
-                            const st = cleanRow(row.data);
-                            if (st.trip_id && tripToGroupMap[st.trip_id] && st.stop_id) {
-                                if (!tripStops[st.trip_id]) tripStops[st.trip_id] = [];
-                                
-                                let seq = parseInt(st.stop_sequence, 10);
-                                if (isNaN(seq)) seq = seqFallback++;
-
-                                tripStops[st.trip_id].push({
-                                    stop_id: st.stop_id,
-                                    seq: seq
-                                });
-                            }
-                        },
-                        complete: resolve,
-                        error: reject
-                    });
-                });
-
-                // 5. Tvorba sítě úseků (bez duplicit na stejném spoji)
-                const groupSegments = {}; 
-                const usedStops = new Set();
-
-                Object.keys(tripStops).forEach(trip_id => {
-                    const group = tripToGroupMap[trip_id];
-                    if (!groupSegments[group]) groupSegments[group] = new Set();
-                    
-                    const stopsList = tripStops[trip_id];
-                    stopsList.sort((a, b) => a.seq - b.seq);
-
-                    for (let i = 0; i < stopsList.length - 1; i++) {
-                        let id1 = stopsList[i].stop_id;
-                        let id2 = stopsList[i+1].stop_id;
-                        if (id1 === id2) continue; 
-                        
-                        let segmentKey = id1 < id2 ? `${id1}|${id2}` : `${id2}|${id1}`;
-                        groupSegments[group].add(segmentKey);
-                        usedStops.add(id1);
-                        usedStops.add(id2);
-                    }
-                });
-
-                const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    attribution: '© OpenStreetMap',
-                    maxZoom: 19
-                }).addTo(map);
-
-                // 6. Kreslení úseků
-                Object.keys(groupSegments).forEach(group => {
-                    const style = getGroupStyle(group);
-                    const segmentsArray = Array.from(groupSegments[group]);
-                    
-                    segmentsArray.forEach(segKey => {
-                        const [id1, id2] = segKey.split('|');
-                        const stop1 = getStopSafe(id1);
-                        const stop2 = getStopSafe(id2);
-                        
-                        if (stop1 && stop2) {
-                            const offsetCoords = offsetSegment(stop1.lat, stop1.lon, stop2.lat, stop2.lon, style.offsetMeters);
-                            
-                            // offsetCoords vrátí null, pokud je skok větší než 80 km (ochrana proti pavučinám)
-                            if (offsetCoords) {
-                                L.polyline(offsetCoords, {
-                                    color: style.color,
-                                    weight: 3,
-                                    opacity: 0.8,
-                                    lineCap: 'round',
-                                    lineJoin: 'round'
-                                }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
-                            }
-                        }
-                    });
-                });
-
-                // 7. Zastávky při přiblížení
-                const stopsLayer = L.layerGroup();
-                usedStops.forEach(stop_id => {
-                    const stop = getStopSafe(stop_id);
-                    if(stop) {
-                        L.circleMarker([stop.lat, stop.lon], {
+        // Stažení vygenerovaných dat
+        fetch('trasy.geojson')
+            .then(response => {
+                if (!response.ok) throw new Error("Soubor trasy.geojson nebyl nalezen.");
+                return response.json();
+            })
+            .then(data => {
+                L.geoJSON(data, {
+                    // Styl a logika pro každý prvek (Zastávka vs. Linka)
+                    pointToLayer: function (feature, latlng) {
+                        return L.circleMarker(latlng, {
                             radius: 4, color: '#000', weight: 1, fillColor: '#fff', fillOpacity: 1
-                        }).bindTooltip(stop.name).addTo(stopsLayer);
-                    }
-                });
-
-                map.on('zoomend', function() {
-                    if (map.getZoom() >= 13) {
-                        if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
-                    } else {
-                        if (map.hasLayer(stopsLayer)) map.removeLayer(stopsLayer);
+                        }).bindTooltip(feature.properties.name);
+                    },
+                    style: function(feature) {
+                        if (feature.geometry.type === "LineString") {
+                            return {
+                                color: getColorForGroup(feature.properties.group),
+                                weight: 3,
+                                opacity: 0.7,
+                                lineCap: 'round',
+                                lineJoin: 'round'
+                            };
+                        }
+                    },
+                    onEachFeature: function (feature, layer) {
+                        if (feature.geometry.type === "LineString") {
+                            layer.bindTooltip(`Linka: ${feature.properties.group}`, { sticky: true });
+                            linesLayer.addLayer(layer);
+                        } else if (feature.geometry.type === "Point") {
+                            stopsLayer.addLayer(layer);
+                        }
                     }
                 });
 
                 document.getElementById('loading').style.display = 'none';
+            })
+            .catch(error => {
+                document.getElementById('loading').innerText = "Chyba: " + error.message;
+                document.getElementById('loading').style.background = "#e74c3c";
+                document.getElementById('loading').style.color = "#fff";
+            });
 
-            } catch (error) {
-                console.error("Chyba:", error);
-                document.getElementById('loading-text').innerText = "Vyskytla se chyba, více v konzoli (F12).";
+        // Zobrazení zastávek pouze při detailním přiblížení
+        map.on('zoomend', function() {
+            if (map.getZoom() >= 13) {
+                if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
+            } else {
+                if (map.hasLayer(stopsLayer)) map.removeLayer(stopsLayer);
             }
-        }
-
-        initMap();
+        });
     </script>
 </body>
 </html>
