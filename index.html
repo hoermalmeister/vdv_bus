@@ -2,7 +2,7 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV - Všechny varianty</title>
+    <title>Mapa autobusů VDV - Unikátní úseky</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -27,7 +27,7 @@
     <div id="loading">
         <div class="spinner"></div>
         <h2 id="loading-text">Načítání struktury linek...</h2>
-        <p>Zpracování všech variant tras může chvíli trvat.</p>
+        <p>Hledám unikátní úseky mezi zastávkami pro zrychlení mapy.</p>
     </div>
     <div id="map"></div>
 
@@ -54,14 +54,13 @@
             });
         }
 
-        // Pomocná funkce, která pro název linky vygeneruje vždy stejnou barvu a odsazení (offset)
+        // Pomocná funkce pro vygenerování stálé barvy a posunu pro linku
         function getGroupStyle(group) {
             let hash = 0;
             for (let i = 0; i < group.length; i++) {
                 hash = group.charCodeAt(i) + ((hash << 5) - hash);
             }
             const absHash = Math.abs(hash);
-            // Výpočet odsazení: rozprostřeme linky od -6 do +6 pixelů
             const offsets = [-6, -4, -2, 0, 2, 4, 6];
             return {
                 color: colors[absHash % colors.length],
@@ -87,7 +86,7 @@
                     stopsMap[s.stop_id] = { lat: parseFloat(s.stop_lat), lon: parseFloat(s.stop_lon), name: s.stop_name };
                 });
 
-                // 3. Seskupení linek dle posledních 3 čísel
+                // 3. Seskupení linek
                 const routesMap = {}; 
                 routes.forEach(r => {
                     let name = r.route_short_name ? r.route_short_name.toString().trim() : "";
@@ -106,7 +105,7 @@
                 });
 
                 // 5. Streamované načítání stop_times
-                loadingText.innerText = "Skládám všechny varianty tras...";
+                loadingText.innerText = "Zpracování jízdních řádů...";
                 const tripStops = {}; 
 
                 await new Promise((resolve, reject) => {
@@ -129,67 +128,76 @@
                     });
                 });
 
-                loadingText.innerText = "Vykreslování mapy (filtrace duplicitních tvarů)...";
+                loadingText.innerText = "Rozklad tras na unikátní úseky...";
 
-                // 6. Filtrace: Najdeme všechny UNIKÁTNÍ tvary tras pro každou skupinu
-                // Pokud jede linka 10x denně po absolutně stejných zastávkách, vykreslíme ji jen jednou.
-                const uniqueRouteShapes = []; 
-                const shapeHashesPerGroup = {}; // group -> set(hashes)
+                // 6. ROZKLAD NA ÚSEKY: Získáme pouze unikátní spojení mezi dvěma stanicemi pro danou linku
+                const groupSegments = {}; // struktura: group -> Set("stopA_id|stopB_id")
+                const usedStops = new Set();
 
                 Object.keys(tripStops).forEach(trip_id => {
                     const group = tripToGroupMap[trip_id];
-                    const stopsList = tripStops[trip_id];
-                    
-                    // Seřadit podle času/sekvence
-                    stopsList.sort((a, b) => a.seq - b.seq);
-                    
-                    // Vytvoříme otisk ("hash") tvaru trasy z IDček zastávek
-                    const shapeHash = stopsList.map(st => st.stop_id).join('|');
-
-                    if (!shapeHashesPerGroup[group]) {
-                        shapeHashesPerGroup[group] = new Set();
+                    if (!groupSegments[group]) {
+                        groupSegments[group] = new Set();
                     }
+                    
+                    const stopsList = tripStops[trip_id];
+                    stopsList.sort((a, b) => a.seq - b.seq); // Seřazení podle pořadí zastávek
 
-                    // Pokud jsme tuto přesnou variantu pro tuto linku ještě neviděli, uložíme ji
-                    if (!shapeHashesPerGroup[group].has(shapeHash)) {
-                        shapeHashesPerGroup[group].add(shapeHash);
-                        uniqueRouteShapes.push({
-                            group: group,
-                            stops: stopsList
-                        });
+                    // Procházíme zastávku po zastávce a tvoříme úseky
+                    for (let i = 0; i < stopsList.length - 1; i++) {
+                        let id1 = stopsList[i].stop_id;
+                        let id2 = stopsList[i+1].stop_id;
+                        
+                        // Ignorujeme případné chyby v datech (úsek sám do sebe)
+                        if (id1 === id2) continue; 
+                        
+                        // Uspořádáme IDčka abecedně, aby úsek A->B byl stejný jako B->A (obousměrná deduplikace)
+                        let segmentKey = id1 < id2 ? `${id1}|${id2}` : `${id2}|${id1}`;
+                        
+                        groupSegments[group].add(segmentKey);
+                        usedStops.add(id1);
+                        usedStops.add(id2);
                     }
                 });
 
-                // 7. Inicializace mapy
-                const map = L.map('map').setView([49.4, 15.6], 9); 
+                // 7. Inicializace mapy (s preferCanvas: true kvůli plynulému kreslení velkého množství krátkých segmentů)
+                const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                     attribution: '© OpenStreetMap',
                     maxZoom: 19
                 }).addTo(map);
 
-                const usedStops = new Set();
-
-                // 8. Vykreslení všech unikátních variant
-                uniqueRouteShapes.forEach(shape => {
-                    const latlngs = [];
-                    shape.stops.forEach(st => {
-                        const stop = stopsMap[st.stop_id];
-                        if (stop && !isNaN(stop.lat) && !isNaN(stop.lon)) {
-                            latlngs.push([stop.lat, stop.lon]);
-                            usedStops.add(st.stop_id);
+                // 8. Vykreslení segmentů
+                Object.keys(groupSegments).forEach(group => {
+                    const style = getGroupStyle(group);
+                    const segmentsArray = Array.from(groupSegments[group]);
+                    
+                    // Připravíme pole souřadnicových párů pro MultiPolyline
+                    const multiLatLngs = [];
+                    
+                    segmentsArray.forEach(segKey => {
+                        const [id1, id2] = segKey.split('|');
+                        const stop1 = stopsMap[id1];
+                        const stop2 = stopsMap[id2];
+                        
+                        if (stop1 && stop2 && !isNaN(stop1.lat) && !isNaN(stop2.lat)) {
+                            multiLatLngs.push([
+                                [stop1.lat, stop1.lon],
+                                [stop2.lat, stop2.lon]
+                            ]);
                         }
                     });
 
-                    if (latlngs.length > 1) {
-                        const style = getGroupStyle(shape.group);
-
-                        // Použití offsetu z pluginu
-                        L.polyline(latlngs, {
+                    if (multiLatLngs.length > 0) {
+                        // Leaflet umí přijmout pole polí (MultiPolyline) a vykreslit je v jedné vrstvě - velmi rychlé!
+                        L.polyline(multiLatLngs, {
                             color: style.color,
                             weight: 3,
                             opacity: 0.8,
-                            offset: style.offset // Toto roztáhne linky vedle sebe!
-                        }).bindTooltip(`Linka: ${shape.group}`, { sticky: true }).addTo(map);
+                            offset: style.offset, // Posune i rozkouskované segmenty
+                            lineCap: 'round', // Zaoblí konce úseků, aby na sebe vizuálně lépe navazovaly
+                            lineJoin: 'round'
+                        }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
                     }
                 });
 
@@ -197,13 +205,15 @@
                 const stopsLayer = L.layerGroup();
                 usedStops.forEach(stop_id => {
                     const stop = stopsMap[stop_id];
-                    L.circleMarker([stop.lat, stop.lon], {
-                        radius: 4,
-                        color: '#000',
-                        weight: 1,
-                        fillColor: '#fff',
-                        fillOpacity: 1
-                    }).bindTooltip(stop.name).addTo(stopsLayer);
+                    if(stop && !isNaN(stop.lat) && !isNaN(stop.lon)) {
+                        L.circleMarker([stop.lat, stop.lon], {
+                            radius: 4,
+                            color: '#000',
+                            weight: 1,
+                            fillColor: '#fff',
+                            fillOpacity: 1
+                        }).bindTooltip(stop.name).addTo(stopsLayer);
+                    }
                 });
 
                 map.on('zoomend', function() {
