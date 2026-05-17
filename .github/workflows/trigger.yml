@@ -36,8 +36,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
-          git add trasy.geojson
+          git add trasy.geojson osrm_cache.json
           
-          # Podmínka zkontroluje, jestli se soubor od včerejška reálně změnil.
-          # Pokud ano, provede commit a push. Pokud ne, tiše se ukončí a nespadne.
           git diff --quiet && git diff --staged --quiet || (git commit -m "Automatická aktualizace trasy.geojson 🚌" && git push)
