@@ -2,7 +2,7 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV - GeoJSON verze</title>
+    <title>Mapa autobusů VDV - Offset tras</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
@@ -21,28 +21,36 @@
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-polylineoffset@1.1.1/leaflet.polylineoffset.min.js"></script>
 
     <script>
-        // Inicializace mapy s nejrychlejším renderováním
-        const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
+        // Úmyslně bez preferCanvas: true, aby správně fungoval offset plugin!
+        // (Díky GeoJSONu je to teď dostatečně rychlé i přes SVG)
+        const map = L.map('map').setView([49.4, 15.6], 9); 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap',
             maxZoom: 19
         }).addTo(map);
 
         const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075'];
+        
+        // Rozestupy linek od středu silnice v pixelech
+        const offsetPixels = [-9, -6, -3, 0, 3, 6, 9];
 
-        function getColorForGroup(group) {
+        function getStyleForGroup(group) {
             let hash = 0;
             for (let i = 0; i < group.length; i++) hash = group.charCodeAt(i) + ((hash << 5) - hash);
-            return colors[Math.abs(hash) % colors.length];
+            const absHash = Math.abs(hash);
+            
+            return {
+                color: colors[absHash % colors.length],
+                offset: offsetPixels[absHash % offsetPixels.length]
+            };
         }
 
-        // Vrstvy
         const linesLayer = L.layerGroup().addTo(map);
         const stopsLayer = L.layerGroup();
 
-        // Stažení vygenerovaných dat
         fetch('trasy.geojson')
             .then(response => {
                 if (!response.ok) throw new Error("Soubor trasy.geojson nebyl nalezen.");
@@ -50,7 +58,6 @@
             })
             .then(data => {
                 L.geoJSON(data, {
-                    // Styl a logika pro každý prvek (Zastávka vs. Linka)
                     pointToLayer: function (feature, latlng) {
                         return L.circleMarker(latlng, {
                             radius: 4, color: '#000', weight: 1, fillColor: '#fff', fillOpacity: 1
@@ -58,10 +65,12 @@
                     },
                     style: function(feature) {
                         if (feature.geometry.type === "LineString") {
+                            const st = getStyleForGroup(feature.properties.group);
                             return {
-                                color: getColorForGroup(feature.properties.group),
+                                color: st.color,
                                 weight: 3,
-                                opacity: 0.7,
+                                opacity: 0.8,
+                                offset: st.offset, // Využití posunu
                                 lineCap: 'round',
                                 lineJoin: 'round'
                             };
@@ -85,7 +94,6 @@
                 document.getElementById('loading').style.color = "#fff";
             });
 
-        // Zobrazení zastávek pouze při detailním přiblížení
         map.on('zoomend', function() {
             if (map.getZoom() >= 13) {
                 if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
