@@ -69,6 +69,10 @@ for i, (index, row) in enumerate(unique_segments.iterrows(), 1):
     lon1, lat1 = stops_clean.loc[s1, 'stop_lon'], stops_clean.loc[s1, 'stop_lat']
     lon2, lat2 = stops_clean.loc[s2, 'stop_lon'], stops_clean.loc[s2, 'stop_lat']
     
+    # NOVÉ: Kontrola, zda nám nechybí souřadnice (ochrana proti chybě NaN na webu)
+    if pd.isna(lon1) or pd.isna(lat1) or pd.isna(lon2) or pd.isna(lat2):
+        continue
+    
     if abs(lon1 - lon2) > 0.8 or abs(lat1 - lat2) > 0.8:
         continue
 
@@ -103,7 +107,7 @@ for i, (index, row) in enumerate(unique_segments.iterrows(), 1):
 # Uložení CACHE paměti pro zítřek
 print("Ukládám mezipaměť tras...")
 with open(CACHE_FILE, "w", encoding="utf-8") as f:
-    json.dump(osrm_cache, f, ensure_ascii=False)
+    json.dump(osrm_cache, f, ensure_ascii=False, allow_nan=False)
 
 # Zastávky
 for idx, row in stops_clean.iterrows():
@@ -121,6 +125,6 @@ geojson_obj = {
 
 print("Generuji trasy.geojson...")
 with open("trasy.geojson", "w", encoding="utf-8") as f:
-    json.dump(geojson_obj, f, ensure_ascii=False)
+    json.dump(geojson_obj, f, ensure_ascii=False, allow_nan=False)
 
 print("HOTOVO! Vše proběhlo v pořádku.")
