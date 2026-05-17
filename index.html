@@ -98,8 +98,8 @@
             });
 
         function checkZoomLevel() {
-            // ZMĚNA: Popisky se zapnou opravdu AŽ na zoomu 15
-            if (map.getZoom() >= 15) {
+            // ZMĚNA: Popisky se zapnou výhradně a pouze na zoomu 15
+            if (map.getZoom() === 15) {
                 if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
             } else {
                 if (map.hasLayer(stopsLayer)) map.removeLayer(stopsLayer);
