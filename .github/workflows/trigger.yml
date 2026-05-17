@@ -30,7 +30,7 @@ jobs:
           pip install pandas requests
 
       - name: Spuštění Python skriptu (tvorba trasy.geojson)
-        run: python generator.py
+        run: python .github/scripts/pre.py
 
       - name: Uložení změn a nahrání zpět na web (Push)
         run: |
