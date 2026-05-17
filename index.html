@@ -2,7 +2,7 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV</title>
+    <title>Mapa autobusů VDV - Finální čistá verze</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -27,18 +27,16 @@
     <div id="loading">
         <div class="spinner"></div>
         <h2 id="loading-text">Načítání struktury linek...</h2>
-        <p>Generuji optimalizovanou SVG mapu tras.</p>
+        <p>Vypočítávám přesné souřadnice posunutých linek (bez pluginů).</p>
     </div>
     <div id="map"></div>
 
-    <!-- Knihovny pro mapu, posun čar (offset) a parsování -->
+    <!-- Knihovny pro mapu a parsování (plugin polylineoffset jsme odstranili) -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/leaflet-polylineoffset@1.1.1/leaflet.polylineoffset.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 
     <script>
         const baseUrl = "https://hoermalmeister.github.io/gtfs-rehost/vdv/";
-
         const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075'];
 
         function loadCSV(file) {
@@ -53,16 +51,44 @@
             });
         }
 
+        // Vlastní matematická funkce pro fyzický posun úseku na mapě o X metrů kolmo k silnici
+        function offsetSegment(lat1, lon1, lat2, lon2, offsetMeters) {
+            if (offsetMeters === 0) return [[lat1, lon1], [lat2, lon2]];
+            
+            const meterToLat = 1 / 111320; // 1 stupeň = cca 111 320 metrů
+            const latMid = (lat1 + lat2) / 2;
+            const cosLat = Math.cos(latMid * Math.PI / 180);
+            
+            const dy = (lat2 - lat1) / meterToLat;
+            const dx = (lon2 - lon1) * cosLat / meterToLat;
+            const length = Math.sqrt(dx*dx + dy*dy);
+            
+            if (length === 0) return [[lat1, lon1], [lat2, lon2]];
+            
+            // Kolmý vektor k silnici
+            const nx = -dy / length;
+            const ny = dx / length;
+            
+            const dLat = ny * offsetMeters * meterToLat;
+            const dLon = nx * offsetMeters * meterToLat / cosLat;
+            
+            return [
+                [lat1 + dLat, lon1 + dLon],
+                [lat2 + dLat, lon2 + dLon]
+            ];
+        }
+
         function getGroupStyle(group) {
             let hash = 0;
             for (let i = 0; i < group.length; i++) {
                 hash = group.charCodeAt(i) + ((hash << 5) - hash);
             }
             const absHash = Math.abs(hash);
-            const offsets = [-8, -5, -2, 1, 4, 7]; // Odsazení v pixelech
+            // Definice rozestupů linek v reálných METRECH vedle sebe
+            const offsets = [-120, -80, -40, 0, 40, 80, 120]; 
             return {
                 color: colors[absHash % colors.length],
-                offset: offsets[absHash % offsets.length]
+                offsetMeters: offsets[absHash % offsets.length]
             };
         }
 
@@ -79,7 +105,9 @@
 
                 const stopsMap = {};
                 stops.forEach(s => {
-                    stopsMap[s.stop_id] = { lat: parseFloat(s.stop_lat), lon: parseFloat(s.stop_lon), name: s.stop_name };
+                    if (s.stop_lat && s.stop_lon) {
+                        stopsMap[s.stop_id] = { lat: parseFloat(s.stop_lat), lon: parseFloat(s.stop_lon), name: s.stop_name };
+                    }
                 });
 
                 const routesMap = {}; 
@@ -149,14 +177,14 @@
                     }
                 });
 
-                // Inicializace mapy (ZÁMĚRNĚ BEZ preferCanvas, aby fungoval plugin)
-                const map = L.map('map').setView([49.4, 15.6], 9); 
+                // ZAPNUTO preferCanvas = obrovský nárůst výkonu
+                const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                     attribution: '© OpenStreetMap',
                     maxZoom: 19
                 }).addTo(map);
 
-                // VYKRESLENÍ SEGMENTŮ jako MultiPolyline (Výrazně šetří výkon SVG)
+                // VYKRESLENÍ SEGMENTŮ s vlastním matematickým výpočtem pozice
                 Object.keys(groupSegments).forEach(group => {
                     const style = getGroupStyle(group);
                     const segmentsArray = Array.from(groupSegments[group]);
@@ -168,21 +196,17 @@
                         const stop2 = stopsMap[id2];
                         
                         if (stop1 && stop2 && !isNaN(stop1.lat) && !isNaN(stop1.lon) && !isNaN(stop2.lat) && !isNaN(stop2.lon)) {
-                            // Zabalíme úsek do pole
-                            multiLatLngs.push([
-                                [stop1.lat, stop1.lon],
-                                [stop2.lat, stop2.lon]
-                            ]);
+                            // Upravíme souřadnice přesně na míru ještě před vykreslením
+                            const offsetCoords = offsetSegment(stop1.lat, stop1.lon, stop2.lat, stop2.lon, style.offsetMeters);
+                            multiLatLngs.push(offsetCoords);
                         }
                     });
 
-                    // Vykreslíme všechny úseky jedné linky naraz!
                     if (multiLatLngs.length > 0) {
                         L.polyline(multiLatLngs, {
                             color: style.color,
                             weight: 3,
                             opacity: 0.8,
-                            offset: style.offset, // Plugin si s tím v SVG už poradí
                             lineCap: 'round',
                             lineJoin: 'round'
                         }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
@@ -216,7 +240,7 @@
 
             } catch (error) {
                 console.error("Chyba:", error);
-                document.getElementById('loading-text').innerText = "Vyskytla se chyba při zpracování. Zkontroluj konzoli prohlížeče (F12).";
+                document.getElementById('loading-text').innerText = "Vyskytla se chyba. Podrobnosti v F12 konzoli prohlížeče.";
             }
         }
 
