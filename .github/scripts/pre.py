@@ -44,11 +44,11 @@ trip_shapes = stop_times.groupby('trip_id')['base_stop'].apply(tuple).reset_inde
 trip_shapes['group'] = trip_shapes['trip_id'].map(trip_group_map)
 unique_shapes = trip_shapes.drop_duplicates(subset=['group', 'base_stop'])
 
-# Příprava hran pro OSRM
+# Příprava hran pro OSRM (ZMĚNĚNO NA @@@ ABY SE TO NEBILO S ID ZASTÁVEK)
 edges_to_route = set()
 for seq in unique_shapes['base_stop']:
     for i in range(len(seq) - 1):
-        edges_to_route.add(f"{seq[i]}|{seq[i+1]}")
+        edges_to_route.add(f"{seq[i]}@@@{seq[i+1]}")
 
 osrm_cache = {}
 if os.path.exists(CACHE_FILE):
@@ -63,7 +63,9 @@ for i, edge in enumerate(edges_to_route, 1):
     if i % 200 == 0: print(f"Zpracováno {i}/{total_edges} hran...")
     if edge in osrm_cache: continue
     
-    s1, s2 = edge.split('|')
+    # ZDE OPRAVENO ROZDĚLOVÁNÍ
+    s1, s2 = edge.split('@@@')
+    
     if s1 not in stops_clean.index or s2 not in stops_clean.index: continue
     
     lon1, lat1 = stops_clean.loc[s1, 'stop_lon'], stops_clean.loc[s1, 'stop_lat']
@@ -101,7 +103,7 @@ for _, row in unique_shapes.iterrows():
     
     # Lepení úseků do jedné obří souvislé cesty
     for i in range(len(seq) - 1):
-        edge = f"{seq[i]}|{seq[i+1]}"
+        edge = f"{seq[i]}@@@{seq[i+1]}"
         if edge in osrm_cache:
             clean_geom = [[lon, lat] for lon, lat in osrm_cache[edge] if pd.notna(lon) and pd.notna(lat)]
             if not clean_geom: continue
