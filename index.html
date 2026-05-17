@@ -61,7 +61,7 @@
                 hash = group.charCodeAt(i) + ((hash << 5) - hash);
             }
             const absHash = Math.abs(hash);
-            const offsets = [-6, -4, -2, 0, 2, 4, 6];
+            const offsets = [-8, -5, -2, 1, 4, 7]; // Trochu širší rozestupy pro lepší čitelnost
             return {
                 color: colors[absHash % colors.length],
                 offset: offsets[absHash % offsets.length]
@@ -72,7 +72,6 @@
             try {
                 const loadingText = document.getElementById('loading-text');
 
-                // 1. Stáhnutí základních souborů
                 loadingText.innerText = "Načítání linek, spojů a zastávek...";
                 const [routes, trips, stops] = await Promise.all([
                     loadCSV("routes.txt"),
@@ -80,13 +79,11 @@
                     loadCSV("stops.txt")
                 ]);
 
-                // 2. Indexace zastávek
                 const stopsMap = {};
                 stops.forEach(s => {
                     stopsMap[s.stop_id] = { lat: parseFloat(s.stop_lat), lon: parseFloat(s.stop_lon), name: s.stop_name };
                 });
 
-                // 3. Seskupení linek
                 const routesMap = {}; 
                 routes.forEach(r => {
                     let name = r.route_short_name ? r.route_short_name.toString().trim() : "";
@@ -96,7 +93,6 @@
                     }
                 });
 
-                // 4. Namapování spojů na skupiny linek
                 const tripToGroupMap = {};
                 trips.forEach(t => {
                     if (routesMap[t.route_id]) {
@@ -104,7 +100,6 @@
                     }
                 });
 
-                // 5. Streamované načítání stop_times
                 loadingText.innerText = "Zpracování jízdních řádů...";
                 const tripStops = {}; 
 
@@ -130,8 +125,7 @@
 
                 loadingText.innerText = "Rozklad tras na unikátní úseky...";
 
-                // 6. ROZKLAD NA ÚSEKY: Získáme pouze unikátní spojení mezi dvěma stanicemi pro danou linku
-                const groupSegments = {}; // struktura: group -> Set("stopA_id|stopB_id")
+                const groupSegments = {}; 
                 const usedStops = new Set();
 
                 Object.keys(tripStops).forEach(trip_id => {
@@ -141,17 +135,14 @@
                     }
                     
                     const stopsList = tripStops[trip_id];
-                    stopsList.sort((a, b) => a.seq - b.seq); // Seřazení podle pořadí zastávek
+                    stopsList.sort((a, b) => a.seq - b.seq);
 
-                    // Procházíme zastávku po zastávce a tvoříme úseky
                     for (let i = 0; i < stopsList.length - 1; i++) {
                         let id1 = stopsList[i].stop_id;
                         let id2 = stopsList[i+1].stop_id;
                         
-                        // Ignorujeme případné chyby v datech (úsek sám do sebe)
                         if (id1 === id2) continue; 
                         
-                        // Uspořádáme IDčka abecedně, aby úsek A->B byl stejný jako B->A (obousměrná deduplikace)
                         let segmentKey = id1 < id2 ? `${id1}|${id2}` : `${id2}|${id1}`;
                         
                         groupSegments[group].add(segmentKey);
@@ -160,48 +151,42 @@
                     }
                 });
 
-                // 7. Inicializace mapy (s preferCanvas: true kvůli plynulému kreslení velkého množství krátkých segmentů)
+                // Inicializace mapy s Canvas renderováním
                 const map = L.map('map', { preferCanvas: true }).setView([49.4, 15.6], 9); 
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                     attribution: '© OpenStreetMap',
                     maxZoom: 19
                 }).addTo(map);
 
-                // 8. Vykreslení segmentů
+                // VYKRESLENÍ SEGMENTŮ (Opraveno na samostatné čáry)
                 Object.keys(groupSegments).forEach(group => {
                     const style = getGroupStyle(group);
                     const segmentsArray = Array.from(groupSegments[group]);
-                    
-                    // Připravíme pole souřadnicových párů pro MultiPolyline
-                    const multiLatLngs = [];
                     
                     segmentsArray.forEach(segKey => {
                         const [id1, id2] = segKey.split('|');
                         const stop1 = stopsMap[id1];
                         const stop2 = stopsMap[id2];
                         
-                        if (stop1 && stop2 && !isNaN(stop1.lat) && !isNaN(stop2.lat)) {
-                            multiLatLngs.push([
+                        // Zkontrolujeme, že zastávky existují a mají platné souřadnice
+                        if (stop1 && stop2 && !isNaN(stop1.lat) && !isNaN(stop1.lon) && !isNaN(stop2.lat) && !isNaN(stop2.lon)) {
+                            // Vytvoříme samostatnou polyline pro každý unikátní úsek
+                            L.polyline([
                                 [stop1.lat, stop1.lon],
                                 [stop2.lat, stop2.lon]
-                            ]);
+                            ], {
+                                color: style.color,
+                                weight: 3,
+                                opacity: 0.8,
+                                offset: style.offset, // Plugin nyní dostane vždy jednoduchou čáru
+                                lineCap: 'round',
+                                lineJoin: 'round'
+                            }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
                         }
                     });
-
-                    if (multiLatLngs.length > 0) {
-                        // Leaflet umí přijmout pole polí (MultiPolyline) a vykreslit je v jedné vrstvě - velmi rychlé!
-                        L.polyline(multiLatLngs, {
-                            color: style.color,
-                            weight: 3,
-                            opacity: 0.8,
-                            offset: style.offset, // Posune i rozkouskované segmenty
-                            lineCap: 'round', // Zaoblí konce úseků, aby na sebe vizuálně lépe navazovaly
-                            lineJoin: 'round'
-                        }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
-                    }
                 });
 
-                // 9. Vrstva zastávek (objeví se pouze při blízkém zoomu 14+)
+                // Vrstva zastávek
                 const stopsLayer = L.layerGroup();
                 usedStops.forEach(stop_id => {
                     const stop = stopsMap[stop_id];
@@ -224,7 +209,6 @@
                     }
                 });
 
-                // Konec - skrytí načítání
                 document.getElementById('loading').style.display = 'none';
 
             } catch (error) {
