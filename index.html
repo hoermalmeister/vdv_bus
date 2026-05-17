@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="utf-8">
+    <title>Mapa autobusů VDV</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; }
+        #map { width: 100%; height: 100%; }
+        #loading {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255, 255, 255, 0.9); z-index: 9999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            font-family: sans-serif; text-align: center; padding: 20px;
+        }
+        .spinner {
+            border: 8px solid #f3f3f3; border-top: 8px solid #3498db;
+            border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div class="spinner"></div>
+        <h2 id="loading-text">Načítání struktury linek...</h2>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+    <script>
+        const baseUrl = "https://hoermalmeister.github.io/gtfs-rehost/vdv/";
+
+        // Pomocná funkce pro stahování CSV
+        function loadCSV(file) {
+            return new Promise((resolve, reject) => {
+                Papa.parse(baseUrl + file, {
+                    download: true,
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: results => resolve(results.data),
+                    error: reject
+                });
+            });
+        }
+
+        async function initMap() {
+            try {
+                const loadingText = document.getElementById('loading-text');
+
+                // 1. Stáhnutí základních souborů
+                loadingText.innerText = "Načítání linek, spojů a zastávek...";
+                const [routes, trips, stops] = await Promise.all([
+                    loadCSV("routes.txt"),
+                    loadCSV("trips.txt"),
+                    loadCSV("stops.txt")
+                ]);
+
+                // 2. Indexace zastávek
+                const stopsMap = {};
+                stops.forEach(s => {
+                    stopsMap[s.stop_id] = { lat: parseFloat(s.stop_lat), lon: parseFloat(s.stop_lon), name: s.stop_name };
+                });
+
+                // 3. Seskupení linek dle posledních 3 čísel
+                const routesMap = {}; // route_id -> group
+                routes.forEach(r => {
+                    let name = r.route_short_name ? r.route_short_name.toString().trim() : "";
+                    let group = name.slice(-3); // Poslední tři znaky
+                    if(group) {
+                        routesMap[r.route_id] = { group, originalName: name };
+                    }
+                });
+
+                // 4. Namapování spojů na skupiny linek
+                const tripToGroupMap = {};
+                trips.forEach(t => {
+                    if (routesMap[t.route_id]) {
+                        tripToGroupMap[t.trip_id] = routesMap[t.route_id].group;
+                    }
+                });
+
+                // 5. Streamované načítání stop_times (aby nedošlo k zamrznutí prohlížeče)
+                loadingText.innerText = "Zpracování jízdních řádů (skládám tvary tras)...";
+                const tripStops = {}; // trip_id -> pole zastávek
+
+                await new Promise((resolve, reject) => {
+                    Papa.parse(baseUrl + "stop_times.txt", {
+                        download: true,
+                        header: true,
+                        skipEmptyLines: true,
+                        step: function(row) {
+                            const st = row.data;
+                            // Uchováváme pouze spoje, které umíme přiřadit lince
+                            if (st.trip_id && tripToGroupMap[st.trip_id]) {
+                                if (!tripStops[st.trip_id]) tripStops[st.trip_id] = [];
+                                tripStops[st.trip_id].push({
+                                    stop_id: st.stop_id,
+                                    seq: parseInt(st.stop_sequence)
+                                });
+                            }
+                        },
+                        complete: resolve,
+                        error: reject
+                    });
+                });
+
+                loadingText.innerText = "Vykreslování mapy...";
+
+                // 6. Filtrace: Najdeme nejdelší spoj pro každou skupinu (abychom zamezili nepřehledným překryvům)
+                const longestTripPerGroup = {}; 
+                Object.keys(tripStops).forEach(trip_id => {
+                    const group = tripToGroupMap[trip_id];
+                    if (!longestTripPerGroup[group]) {
+                        longestTripPerGroup[group] = trip_id;
+                    } else {
+                        const currentLongest = longestTripPerGroup[group];
+                        if (tripStops[trip_id].length > tripStops[currentLongest].length) {
+                            longestTripPerGroup[group] = trip_id;
+                        }
+                    }
+                });
+
+                // 7. Inicializace mapy (střed přibližně Kraj Vysočina)
+                const map = L.map('map').setView([49.4, 15.6], 9); 
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '© OpenStreetMap',
+                    maxZoom: 19
+                }).addTo(map);
+
+                const colors = ['#e6194B', '#3cb44b', '#f58231', '#4363d8', '#911eb4', '#42d4f4', '#f032e6', '#469990', '#dcbeff', '#9A6324'];
+                let colorIndex = 0;
+                const usedStops = new Set(); // Množina zastávek, které se opravdu použily
+
+                // Vykreslení čar
+                Object.keys(longestTripPerGroup).forEach(group => {
+                    const trip_id = longestTripPerGroup[group];
+                    const stopsList = tripStops[trip_id];
+                    
+                    // Nutné seřadit podle sekvence!
+                    stopsList.sort((a, b) => a.seq - b.seq);
+
+                    const latlngs = [];
+                    stopsList.forEach(st => {
+                        const stop = stopsMap[st.stop_id];
+                        if (stop && !isNaN(stop.lat) && !isNaN(stop.lon)) {
+                            latlngs.push([stop.lat, stop.lon]);
+                            usedStops.add(st.stop_id);
+                        }
+                    });
+
+                    if (latlngs.length > 0) {
+                        const color = colors[colorIndex % colors.length];
+                        colorIndex++;
+
+                        L.polyline(latlngs, {
+                            color: color,
+                            weight: 3,
+                            opacity: 0.8
+                        }).bindTooltip(`Linka: ${group}`, { sticky: true }).addTo(map);
+                    }
+                });
+
+                // 8. Vrstva zastávek (objeví se pouze při blízkém zoomu)
+                const stopsLayer = L.layerGroup();
+                usedStops.forEach(stop_id => {
+                    const stop = stopsMap[stop_id];
+                    L.circleMarker([stop.lat, stop.lon], {
+                        radius: 5,
+                        color: '#000',
+                        weight: 1,
+                        fillColor: '#fff',
+                        fillOpacity: 1
+                    }).bindTooltip(stop.name).addTo(stopsLayer);
+                });
+
+                // Zachycení události zoomu
+                map.on('zoomend', function() {
+                    // 14 je celkem blízký zoom pro detaily ulic a obcí
+                    if (map.getZoom() >= 14) {
+                        if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
+                    } else {
+                        if (map.hasLayer(stopsLayer)) map.removeLayer(stopsLayer);
+                    }
+                });
+
+                // Skrytí načítací obrazovky
+                document.getElementById('loading').style.display = 'none';
+
+            } catch (error) {
+                console.error("Chyba:", error);
+                document.getElementById('loading-text').innerText = "Vyskytla se chyba při zpracování. Zkontroluj F12 konzoli.";
+            }
+        }
+
+        initMap();
+    </script>
+</body>
+</html>
