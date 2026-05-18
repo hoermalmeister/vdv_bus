@@ -11,7 +11,6 @@ BASE_URL = "https://hoermalmeister.github.io/gtfs-rehost/vdv/"
 CACHE_FILE = "osrm_cache.json"
 
 NEON_COLORS = ['#ff3366', '#33ff66', '#ff9933', '#33ccff', '#cc33ff', '#ffff33', '#ff33ff', '#33ffff', '#ff6666', '#66ff66', '#ffb366', '#66b3ff', '#ff99ff', '#99ffff']
-# Velké uzly, kde je potkání barev povoleno (ignorujeme je při barvení)
 HUBS = ['jihlav', 'třebíč', 'žďár', 'nové město', 'pelhřimov', 'humpolec', 'brod']
 
 def get_clean_group(name):
@@ -22,6 +21,34 @@ def get_clean_group(name):
 def is_hub(stop_name):
     name_lower = str(stop_name).lower()
     return any(hub in name_lower for hub in HUBS)
+
+# --- MATEMATIKA PRO OPTIMALIZACI OBRAZOVKY ---
+def project(lat, lon, zoom):
+    n = 2.0 ** zoom
+    x = (lon + 180.0) / 360.0 * n * 256.0
+    lat_rad = math.radians(lat)
+    y = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n * 256.0
+    return x, y
+
+def haversine(lon1, lat1, lon2, lat2):
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+def get_point_at_fraction(coords, dists, fraction):
+    target = sum(dists) * fraction
+    current = 0
+    for i, d in enumerate(dists):
+        if current + d >= target:
+            ratio = 0 if d == 0 else (target - current) / d
+            lat = coords[i][1] + (coords[i+1][1] - coords[i][1]) * ratio
+            lon = coords[i][0] + (coords[i+1][0] - coords[i][0]) * ratio
+            return [lon, lat]
+        current += d
+    return coords[-1]
 
 print("Stahuji data z GitHubu...")
 routes = pd.read_csv(BASE_URL + "routes.txt")
@@ -60,7 +87,7 @@ if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r", encoding="utf-8") as f:
         osrm_cache = json.load(f)
 
-print("Fáze 1: Routování mezizastávkových úseků přes OSRM...")
+print("Fáze 1: Routování přes OSRM...")
 api_calls = 0
 for pair_id in pair_groups.keys():
     if pair_id in osrm_cache: continue
@@ -91,21 +118,20 @@ if api_calls > 0:
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(osrm_cache, f, ensure_ascii=False, allow_nan=False)
 
-print("Fáze 2: Inteligentní barvení sítě (Graph Coloring)...")
+print("Fáze 2: Inteligentní barvení sítě...")
 group_to_stops = {}
 for _, row in stop_times.iterrows():
     grp = row['group']
     st_id = row['base_stop']
     if st_id in stops_clean.index:
         st_name = stops_clean.loc[st_id, 'stop_name']
-        if not is_hub(st_name): # Ignorujeme velké uzly!
+        if not is_hub(st_name):
             if grp not in group_to_stops: group_to_stops[grp] = set()
             group_to_stops[grp].add(st_id)
 
 groups_list = list(group_to_stops.keys())
 graph = {g: set() for g in groups_list}
 
-# Vytvoření vztahů mezi linkami (pokud sdílí malou zastávku = nesmí mít stejnou barvu)
 for i in range(len(groups_list)):
     for j in range(i + 1, len(groups_list)):
         if group_to_stops[groups_list[i]].intersection(group_to_stops[groups_list[j]]):
@@ -113,7 +139,6 @@ for i in range(len(groups_list)):
             graph[groups_list[j]].add(groups_list[i])
 
 group_colors = {}
-# Barvíme nejdřív ty nejpropletenější linky
 sorted_groups = sorted(groups_list, key=lambda x: len(graph[x]), reverse=True)
 
 for g in sorted_groups:
@@ -122,16 +147,15 @@ for g in sorted_groups:
     if available_colors:
         group_colors[g] = available_colors[0]
     else:
-        # Fallback pokud dojdou barvy (což se stane málokdy): vezmeme tu nejméně konfliktní
         counts = Counter([group_colors[n] for n in graph[g] if n in group_colors])
         group_colors[g] = min(NEON_COLORS, key=lambda c: counts.get(c, 0))
 
-# Fallback pro linky, které nejezdí mimo Huby
 for grp in route_group_map.values():
     if grp not in group_colors:
         group_colors[grp] = NEON_COLORS[sum(ord(c) for c in str(grp)) % len(NEON_COLORS)]
 
 print("Fáze 3: Výpočet paralelních offsetů...")
+raw_features = []
 group_features = {}
 for pair_id, groups in pair_groups.items():
     if pair_id not in osrm_cache: continue
@@ -163,17 +187,15 @@ for pair_id, groups in pair_groups.items():
         if group not in group_features: group_features[group] = []
         group_features[group].append(final_coords)
 
-features = []
 for group, lines in group_features.items():
-    features.append({
+    raw_features.append({
         "type": "Feature",
-        # NYNÍ ZDE UKLÁDÁME VYPOCÍTANOU BARVU
         "properties": { "group": group, "color": group_colors[group] },
         "geometry": { "type": "MultiLineString", "coordinates": lines }
     })
 
 for idx, row in stops_clean.iterrows():
-    features.append({
+    raw_features.append({
         "type": "Feature",
         "properties": { 
             "type": "stop", "name": row['stop_name'],
@@ -182,9 +204,124 @@ for idx, row in stops_clean.iterrows():
         "geometry": { "type": "Point", "coordinates": [row['stop_lon'], row['stop_lat']] }
     })
 
-geojson_obj = { "type": "FeatureCollection", "features": features }
 
-print("Generuji čistý trasy.geojson...")
+print("Fáze 4: Pixelový decluttering (Zoom 13 a 15)...")
+placed_stops_boxes = []
+optimized_features = []
+
+# Zastávky
+for feature in raw_features:
+    if feature["geometry"]["type"] == "Point" and feature["properties"].get("type") == "stop":
+        props = feature["properties"]
+        lon, lat = feature["geometry"]["coordinates"]
+        
+        zone = str(props.get("zone", ""))
+        v_zones = [z.strip() for z in zone.split(',') if z.strip().startswith('V')]
+        
+        if not v_zones:
+            continue
+            
+        px, py = project(lat, lon, 15)
+        total_chars = len(props.get("name", "")) + len(",".join(v_zones))
+        est_width = total_chars * 6.2 + 45
+        
+        cand_box = {
+            "minX": px - est_width / 2, "maxX": px + est_width / 2,
+            "minY": py - 28, "maxY": py - 6
+        }
+        
+        overlaps = False
+        for box in placed_stops_boxes:
+            if not (cand_box["maxX"] < box["minX"] or cand_box["minX"] > box["maxX"] or 
+                    cand_box["maxY"] < box["minY"] or cand_box["minY"] > box["maxY"]):
+                overlaps = True
+                break
+                
+        if not overlaps:
+            placed_stops_boxes.append(cand_box)
+            props["show_label"] = True
+            props["zones_formatted"] = ",".join(v_zones)
+            optimized_features.append(feature)
+
+# Linky
+placed_badge_pixels = []
+for feature in raw_features:
+    if feature["geometry"]["type"] == "MultiLineString":
+        optimized_features.append(feature) # Vždy zachovat silnici
+        
+        group = feature["properties"]["group"]
+        color = feature["properties"]["color"]
+        coords_list = feature["geometry"]["coordinates"]
+        
+        total_length = 0
+        segments_data = []
+        
+        for part in coords_list:
+            part_length = 0
+            dists = []
+            for i in range(len(part) - 1):
+                d = haversine(part[i][0], part[i][1], part[i+1][0], part[i+1][1])
+                dists.append(d)
+                part_length += d
+            total_length += part_length
+            if part_length > 0:
+                segments_data.append({"coords": part, "dists": dists, "length": part_length})
+                
+        if not segments_data: continue
+        segments_data.sort(key=lambda x: x["length"], reverse=True)
+        
+        label_count = 1
+        if total_length > 60000: label_count = 5
+        elif total_length > 40000: label_count = 4
+        elif total_length > 20000: label_count = 3
+        elif total_length > 10000: label_count = 2
+        
+        placed_points = []
+        
+        for seg in segments_data:
+            if len(placed_points) >= label_count: break
+            
+            for fraction in [0.5, 0.25, 0.75]:
+                pt_lon, pt_lat = get_point_at_fraction(seg["coords"], seg["dists"], fraction)
+                is_too_close = False
+                
+                for p in placed_points:
+                    if haversine(pt_lon, pt_lat, p[0], p[1]) < 5000:
+                        is_too_close = True; break
+                        
+                if not is_too_close:
+                    px, py = project(pt_lat, pt_lon, 13)
+                    for pb in placed_badge_pixels:
+                        if abs(px - pb[0]) < 38 and abs(py - pb[1]) < 14:
+                            is_too_close = True; break
+                            
+                if not is_too_close:
+                    placed_points.append((pt_lon, pt_lat))
+                    placed_badge_pixels.append((project(pt_lat, pt_lon, 13)))
+                    
+                    optimized_features.append({
+                        "type": "Feature",
+                        "properties": { "type": "badge", "group": group, "color": color },
+                        "geometry": { "type": "Point", "coordinates": [pt_lon, pt_lat] }
+                    })
+                    break
+                    
+        # Záchranný štítek
+        if not placed_points:
+            seg = segments_data[0]
+            pt_lon, pt_lat = get_point_at_fraction(seg["coords"], seg["dists"], 0.5)
+            hash_val = sum(ord(c) for c in str(group))
+            pt_lat += (((hash_val % 5) - 2) * 0.00015)
+            pt_lon += ((((hash_val * 7) % 5) - 2) * 0.00015)
+            optimized_features.append({
+                "type": "Feature",
+                "properties": { "type": "badge", "group": group, "color": color },
+                "geometry": { "type": "Point", "coordinates": [pt_lon, pt_lat] }
+            })
+
+geojson_obj = { "type": "FeatureCollection", "features": optimized_features }
+
+print("Ukládám plně optimalizovaný trasy.geojson...")
 with open("trasy.geojson", "w", encoding="utf-8") as f:
     json.dump(geojson_obj, f, ensure_ascii=False, allow_nan=False)
 
