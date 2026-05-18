@@ -60,18 +60,15 @@ body, html {
     margin-left: 4px;
 }
 
-/* OPRAVA: Výrazně menší štítky linek */
+/* DYNAMICKÝ ŠTÍTEK LINKY - Velikosti jsou nyní řízeny přes JS */
 .route-map-badge {
     background: #151515 !important;
     color: #ffffff !important;
     font-weight: 800;
-    font-size: 9px; /* Původně 12px, nyní drobnější */
-    padding: 1px 4px; /* Menší vnitřní okraje */
-    border-radius: 4px; /* Ostřejší hrany */
     box-shadow: 0 1px 4px rgba(0,0,0,0.7);
     text-align: center;
     white-space: nowrap;
     border-style: solid !important;
-    border-width: 1.5px !important; /* Tenčí rámeček */
+    transition: all 0.15s ease-out; /* Hladký přechod při změně velikosti zoomu */
 }
 .route-map-badge::before { display: none !important; }
