@@ -15,14 +15,42 @@ const stopsLayer = L.layerGroup().addTo(map);
 
 let allStopsData = []; 
 
-fetch('trasy.geojson')
+// DYNAMICKÉ ŠKÁLOVÁNÍ: Pomocná funkce pro nastavení rozměrů podle aktuálního zoomu
+function adjustBadgeSize(element, zoom) {
+    // Zoom 10 -> písmno 6px, Zoom 11 -> 7px ... až Zoom 15 -> 11px
+    const fontSize = 6 + (zoom - 10); 
+    element.style.fontSize = fontSize + 'px';
+    
+    // Extrémně miniaturní okraje pro nízké zoomy, aby štítky nepřetékaly přes čáru
+    if (zoom <= 11) {
+        element.style.padding = '0px 2px';
+        element.style.borderWidth = '1px';
+    } else if (zoom <= 13) {
+        element.style.padding = '1px 3px';
+        element.style.borderWidth = '1.5px';
+    } else {
+        element.style.padding = '2px 5px';
+        element.style.borderWidth = '2px';
+    }
+}
+
+// Projde všechny štítky aktuálně vyrenderované v DOMu a změní jim styl
+function updateAllBadgeSizes() {
+    const currentZoom = map.getZoom();
+    const badges = document.querySelectorAll('.route-map-badge');
+    badges.forEach(badge => {
+        adjustBadgeSize(badge, currentZoom);
+    });
+}
+
+fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
         L.geoJSON(data, {
             style: function(feature) {
                 if (feature.geometry.type === "MultiLineString") {
                     return {
-                        color: feature.properties.color, // Barvu už nám hlídá Python!
+                        color: feature.properties.color,
                         weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round'
                     };
                 }
@@ -31,15 +59,12 @@ fetch('trasy.geojson')
                 if (feature.geometry.type === "MultiLineString") {
                     linesLayer.addLayer(layer);
 
-                    // --- GEOGRAFICKÁ INTERPOLACE: Měření reálné délky silnice v metrech ---
                     let longestLine = [];
                     let maxDist = 0;
                     
-                    // Linka se skládá z mnoha úseků, najdeme tu hlavní a nejdelší větev
                     feature.geometry.coordinates.forEach(linePart => {
                         let dist = 0;
                         for(let i=0; i<linePart.length-1; i++) {
-                            // GeoJSON [lon, lat] -> Leaflet [lat, lon]
                             dist += map.distance([linePart[i][1], linePart[i][0]], [linePart[i+1][1], linePart[i+1][0]]);
                         }
                         if(dist > maxDist) {
@@ -49,15 +74,12 @@ fetch('trasy.geojson')
                     });
 
                     if (longestLine.length > 0) {
-                        // Dynamický počet štítků podle ujetých kilometrů
-                        let labelCount = 1;
-                        if (maxDist > 60000) labelCount = 4;      // Nad 60 km
-                        else if (maxDist > 35000) labelCount = 3; // Nad 35 km
-                        else if (maxDist > 15000) labelCount = 2; // Nad 15 km
+                        // --- HUSTŠÍ ROZMÍSTĚNÍ: Štítek automaticky každých 6 km trasy ---
+                        const stepDist = 6000; 
+                        const labelCount = Math.max(1, Math.floor(maxDist / stepDist));
 
                         const routeColor = feature.properties.color;
 
-                        // Rozestavíme štítky přesně a rovnoměrně po ujeté vzdálenosti
                         for (let i = 1; i <= labelCount; i++) {
                             let targetDist = maxDist * (i / (labelCount + 1));
                             let currentDist = 0;
@@ -68,7 +90,6 @@ fetch('trasy.geojson')
                                 let p2 = longestLine[j+1];
                                 let d = map.distance([p1[1], p1[0]], [p2[1], p2[0]]);
                                 
-                                // Když překročíme cílovou vzdálenost, spočítáme přesný průsečík
                                 if (currentDist + d >= targetDist) {
                                     let ratio = (targetDist - currentDist) / d;
                                     let lat = p1[1] + (p2[1] - p1[1]) * ratio;
@@ -79,7 +100,6 @@ fetch('trasy.geojson')
                                 currentDist += d;
                             }
                             
-                            // Pojistka, kdyby interpolace nevyšla
                             if (!exactPoint) exactPoint = [longestLine[longestLine.length-1][1], longestLine[longestLine.length-1][0]];
 
                             const badgeTooltip = L.tooltip(exactPoint, {
@@ -89,8 +109,11 @@ fetch('trasy.geojson')
                                 interactive: false
                             }).setContent(feature.properties.group);
 
+                            // Při vykreslení štítku mu nastavíme barvu a okamžitě aplikujeme správný zoom styl
                             badgeTooltip.on('add', function(e) {
-                                e.target.getElement().style.borderColor = routeColor;
+                                const el = e.target.getElement();
+                                el.style.borderColor = routeColor;
+                                adjustBadgeSize(el, map.getZoom());
                             });
 
                             routeBadgesLayer.addLayer(badgeTooltip);
@@ -143,5 +166,9 @@ function updateVisibleStops() {
     });
 }
 
+// Při jakémkoliv dokončení pohybu/zoomu aktualizujeme zastávky i velikosti všech textů
 map.on('moveend', updateVisibleStops);
-map.on('zoomend', updateVisibleStops);
+map.on('zoomend', function() {
+    updateVisibleStops();
+    updateAllBadgeSizes();
+});
