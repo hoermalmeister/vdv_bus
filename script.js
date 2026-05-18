@@ -13,7 +13,6 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 
 const neonColors = ['#ff3366', '#33ff66', '#ff9933', '#33ccff', '#cc33ff', '#ffff33', '#ff33ff', '#33ffff', '#ff6666', '#66ff66', '#ffb366', '#66b3ff', '#ff99ff', '#99ffff'];
 
-// Záložní barvy
 function getColorForGroup(group) {
     let hash = 0;
     for (let i = 0; i < group.length; i++) hash = group.charCodeAt(i) + ((hash << 5) - hash);
@@ -28,7 +27,6 @@ let allStopsData = [];
 
 // DYNAMICKÉ ŠKÁLOVÁNÍ
 function adjustBadgeSize(element, zoom) {
-    // Miniaturní na oddálení, krásně čitelné na přiblížení
     const fontSize = 6 + (zoom - 10); 
     element.style.fontSize = fontSize + 'px';
     
@@ -68,76 +66,101 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                 if (feature.geometry.type === "MultiLineString") {
                     linesLayer.addLayer(layer);
 
-                    // --- NOVÁ, MATEMATICKY PŘESNÁ LOGIKA ROZMÍSTĚNÍ ŠTÍTKŮ ---
                     let totalLength = 0;
                     let segmentsData = [];
 
-                    // 1. Změříme absolutně celou linku (všechny její rozsekané kousky)
+                    // 1. Změříme všechny nesouvislé úseky trasy a najdeme jejich geometrický střed
                     feature.geometry.coordinates.forEach(linePart => {
                         let partLength = 0;
-                        let dists = [];
                         for(let i=0; i<linePart.length-1; i++) {
-                            let p1 = linePart[i];
-                            let p2 = linePart[i+1];
-                            let d = map.distance([p1[1], p1[0]], [p2[1], p2[0]]);
-                            dists.push(d);
-                            partLength += d;
+                            partLength += map.distance([linePart[i][1], linePart[i][0]], [linePart[i+1][1], linePart[i+1][0]]);
                         }
                         totalLength += partLength;
-                        segmentsData.push({ coords: linePart, dists: dists, length: partLength });
-                    });
+                        
+                        if (partLength > 0) {
+                            let targetDist = partLength / 2;
+                            let currentDist = 0;
+                            let exactPoint = null;
 
-                    if (totalLength > 0) {
-                        // 2. Chceme štítek každé 3,5 kilometry. Vždy ale alespoň jeden.
-                        const labelSpacing = 3500; 
-                        const labelCount = Math.max(1, Math.round(totalLength / labelSpacing));
-                        const routeColor = feature.properties.color || getColorForGroup(feature.properties.group);
-
-                        // Určíme si přesné vzdálenosti (např. při 2 štítcích to bude na 25% a 75% trasy)
-                        let targets = [];
-                        for (let i = 1; i <= labelCount; i++) {
-                            targets.push(totalLength * (i - 0.5) / labelCount);
-                        }
-
-                        let currentCumDist = 0;
-                        let targetIndex = 0;
-
-                        // 3. Projdeme celou trasu znovu a zapíchneme štítky na správná místa
-                        for (let s = 0; s < segmentsData.length; s++) {
-                            let seg = segmentsData[s];
-                            for (let i = 0; i < seg.coords.length - 1; i++) {
-                                let d = seg.dists[i];
-
-                                while (targetIndex < targets.length && currentCumDist + d >= targets[targetIndex]) {
-                                    let targetDist = targets[targetIndex];
-                                    let localDist = targetDist - currentCumDist;
-                                    let ratio = d === 0 ? 0 : localDist / d;
-
-                                    let p1 = seg.coords[i];
-                                    let p2 = seg.coords[i+1];
-                                    
-                                    // Geografická interpolace přesně doprostřed silnice
+                            // Hledání přesného středu na tomto kousku silnice
+                            for(let j=0; j<linePart.length-1; j++) {
+                                let p1 = linePart[j];
+                                let p2 = linePart[j+1];
+                                let d = map.distance([p1[1], p1[0]], [p2[1], p2[0]]);
+                                if (currentDist + d >= targetDist) {
+                                    let ratio = (targetDist - currentDist) / d;
                                     let lat = p1[1] + (p2[1] - p1[1]) * ratio;
                                     let lon = p1[0] + (p2[0] - p1[0]) * ratio;
-
-                                    const badgeTooltip = L.tooltip([lat, lon], {
-                                        permanent: true,
-                                        direction: 'center',
-                                        className: 'route-map-badge',
-                                        interactive: false
-                                    }).setContent(feature.properties.group);
-
-                                    badgeTooltip.on('add', function(e) {
-                                        const el = e.target.getElement();
-                                        el.style.borderColor = routeColor;
-                                        adjustBadgeSize(el, map.getZoom());
-                                    });
-
-                                    routeBadgesLayer.addLayer(badgeTooltip);
-                                    targetIndex++;
+                                    exactPoint = [lat, lon];
+                                    break;
                                 }
-                                currentCumDist += d;
+                                currentDist += d;
                             }
+                            if (!exactPoint) exactPoint = [linePart[linePart.length-1][1], linePart[linePart.length-1][0]];
+                            
+                            segmentsData.push({ coords: linePart, length: partLength, midpoint: exactPoint });
+                        }
+                    });
+
+                    if (segmentsData.length > 0) {
+                        // 2. Seřadíme úseky podle délky (chceme štítky primárně na dlouhých rovných úsecích)
+                        segmentsData.sort((a, b) => b.length - a.length);
+
+                        // 3. Omezíme maximální počet štítků podle celkové délky linky
+                        let labelCount = 1;
+                        if (totalLength > 60000) labelCount = 5;      // Extrémně dlouhé linky (5 štítků)
+                        else if (totalLength > 40000) labelCount = 4; // Dlouhé (4 štítky)
+                        else if (totalLength > 20000) labelCount = 3; // Střední (3 štítky)
+                        else if (totalLength > 10000) labelCount = 2; // Krátké (2 štítky)
+
+                        const routeColor = feature.properties.color || getColorForGroup(feature.properties.group);
+                        let placedPoints = [];
+
+                        // 4. Projdeme středy nejdelších úseků a zkusíme tam dát štítek
+                        for (let i = 0; i < segmentsData.length; i++) {
+                            if (placedPoints.length >= labelCount) break;
+
+                            let candidatePoint = segmentsData[i].midpoint;
+                            let isTooClose = false;
+
+                            // PROSTOROVÝ FILTR: Štítek nesmí být blíž než 6 km od jiného štítku této linky
+                            for (let pt of placedPoints) {
+                                if (map.distance(candidatePoint, pt) < 6000) { 
+                                    isTooClose = true;
+                                    break;
+                                }
+                            }
+
+                            if (!isTooClose) {
+                                placedPoints.push(candidatePoint);
+
+                                const badgeTooltip = L.tooltip(candidatePoint, {
+                                    permanent: true,
+                                    direction: 'center',
+                                    className: 'route-map-badge',
+                                    interactive: false
+                                }).setContent(feature.properties.group);
+
+                                badgeTooltip.on('add', function(e) {
+                                    const el = e.target.getElement();
+                                    el.style.borderColor = routeColor;
+                                    adjustBadgeSize(el, map.getZoom());
+                                });
+
+                                routeBadgesLayer.addLayer(badgeTooltip);
+                            }
+                        }
+                        
+                        // Záchranná brzda: Kdyby byla linka tak divná, že jsme neprošli filtrem, dáme prostě jeden štítek na nejdelší část
+                        if (placedPoints.length === 0) {
+                            const badgeTooltip = L.tooltip(segmentsData[0].midpoint, {
+                                permanent: true, direction: 'center', className: 'route-map-badge', interactive: false
+                            }).setContent(feature.properties.group);
+                            badgeTooltip.on('add', function(e) {
+                                e.target.getElement().style.borderColor = routeColor;
+                                adjustBadgeSize(e.target.getElement(), map.getZoom());
+                            });
+                            routeBadgesLayer.addLayer(badgeTooltip);
                         }
                     }
                 } else if (feature.geometry.type === "Point") {
