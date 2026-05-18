@@ -1,11 +1,9 @@
-// Inicializace mapy
 const map = L.map('map', { 
     preferCanvas: true,
     minZoom: 10,
     maxZoom: 15
 }).setView([49.4, 15.6], 10); 
 
-// Tmavé podklady
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: '© OpenStreetMap © CARTO',
     minZoom: 10, maxZoom: 15
@@ -60,7 +58,6 @@ function updateAllBadgeSizes() {
     document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, currentZoom));
 }
 
-// NAČÍTÁNÍ PŘEDŽVÝKANÝCH DAT Z PYTHONU
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
@@ -82,7 +79,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                     linesLayer.addLayer(layer);
 
                 } else if (props.type === "badge") {
-                    // ŠTÍTKY (Ukládáme do šuplíku allBadges, ne do mapy!)
+                    // ŠTÍTKY 
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
 
                     const badgeTooltip = L.tooltip(latlng, {
@@ -95,17 +92,19 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                         el.style.cursor = 'pointer';
                         el.style.pointerEvents = 'auto';
                         
-                        el.addEventListener('click', function(domEvent) {
+                        // ZDE JE TA SLÍBENÁ OPRAVA (onclick místo addEventListener)
+                        el.onclick = function(domEvent) {
                             domEvent.stopPropagation();
                             highlightRoute(activeRouteGroup === props.group ? null : props.group);
-                        });
+                        };
+
                         adjustBadgeSize(el, map.getZoom());
                     });
 
                     allBadges.push({ layer: badgeTooltip, latlng: latlng, group: props.group });
 
                 } else if (props.type === "stop" && props.show_label) {
-                    // ZASTÁVKY (Ukládáme do šuplíku allStops, ne do mapy!)
+                    // ZASTÁVKY 
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
 
                     const htmlContent = `
@@ -133,9 +132,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
         console.error(error);
     });
 
-// EXTRÉMNĚ RYCHLÝ RENDER LOOP - Přidává/maže pouze to, co fyzicky vidíš
 function renderVisibleElements() {
-    // Vezmeme hranice obrazovky + 10 % navíc, ať prvky neblikají přesně na okraji displeje
     const bounds = map.getBounds().pad(0.1);
     const currentZoom = map.getZoom();
 
@@ -165,8 +162,7 @@ function renderVisibleElements() {
     }
 }
 
-// Během tahání mapy je Leaflet plynulý. Jakmile zvedneš prst z displeje (moveend), 
-// vymažeme skryté prvky a přidáme nové.
+// Během tahání mapy je Leaflet plynulý. Jakmile zvedneš prst z displeje (moveend), vymažeme skryté prvky.
 map.on('moveend', renderVisibleElements);
 
 map.on('zoomend', function() {
