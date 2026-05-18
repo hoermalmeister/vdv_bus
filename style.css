@@ -95,3 +95,41 @@ body, html {
 #locate-btn:active {
     transform: scale(0.95);
 }
+
+/* --- REALTIME VOZIDLA --- */
+.live-vehicle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.9);
+    border: 2px solid #fff;
+    transition: all 0.3s ease-out; /* Plynulý pohyb po mapě */
+}
+/* Tvary podle trakce */
+.live-vehicle.bus { border-radius: 50%; }
+.live-vehicle.train { border-radius: 6px; }
+
+/* Barvy zpoždění (Pozadí ikonek) */
+.delay-ok { background-color: #58d68d; }
+.delay-warn { background-color: #f39c12; }
+.delay-alert { background-color: #e74c3c; }
+.delay-unknown { background-color: #7f8c8d; }
+
+/* Barvy zpoždění (Text v tooltipu) */
+.delay-ok-text { color: #58d68d; }
+.delay-warn-text { color: #f39c12; }
+.delay-alert-text { color: #e74c3c; }
+.delay-unknown-text { color: #7f8c8d; }
+
+.vehicle-tooltip {
+    background: rgba(20, 20, 20, 0.95) !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    border-radius: 8px;
+    padding: 8px 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+    color: #fff !important;
+}
+.vehicle-tooltip::before { display: none !important; }
