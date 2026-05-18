@@ -2,7 +2,7 @@
 <html lang="cs">
 <head>
     <meta charset="utf-8">
-    <title>Mapa autobusů VDV - Plynulé UI</title>
+    <title>Mapa autobusů VDV</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
@@ -22,6 +22,7 @@
             font-weight: bold; font-size: 11px;
             box-shadow: 0 0 5px rgba(0,0,0,0.5);
             border-radius: 4px; padding: 2px 4px;
+            white-space: nowrap; /* Zabrání zalamování textu */
         }
         .stop-label::before { display: none !important; }
     </style>
@@ -53,27 +54,16 @@
         }
 
         const linesLayer = L.layerGroup().addTo(map);
-        const stopsLayer = L.layerGroup(); 
+        const stopsLayer = L.layerGroup().addTo(map); // Vrstva je na mapě stále, budeme v ní ale měnit obsah
+        
+        let allStopsData = []; // Zde si uložíme všechny zastávky "nanečisto"
 
         fetch('trasy.geojson')
             .then(response => response.json())
             .then(data => {
                 L.geoJSON(data, {
-                    pointToLayer: function (feature, latlng) {
-                        const rawZone = feature.properties.zone || "";
-                        const vZones = rawZone.split(',').map(z => z.trim()).filter(z => z.startsWith('V'));
-
-                        if (vZones.length === 0) return null;
-                        const fullLabelText = feature.properties.name + " [" + vZones.join(',') + "]";
-
-                        return L.circleMarker(latlng, {
-                            radius: 4, color: '#fff', weight: 1.5, fillColor: '#58d68d', fillOpacity: 1
-                        }).bindTooltip(fullLabelText, { 
-                            permanent: true, direction: 'top', className: 'stop-label', offset: [0, -5]
-                        });
-                    },
                     style: function(feature) {
-                        if (feature.geometry.type === "MultiLineString" || feature.geometry.type === "LineString") {
+                        if (feature.geometry.type === "MultiLineString") {
                             return {
                                 color: getColorForGroup(feature.properties.group),
                                 weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round'
@@ -81,32 +71,60 @@
                         }
                     },
                     onEachFeature: function (feature, layer) {
-                        if (feature.geometry.type === "MultiLineString" || feature.geometry.type === "LineString") {
+                        if (feature.geometry.type === "MultiLineString") {
                             layer.bindTooltip(`Linka: ${feature.properties.group}`, { sticky: true });
                             linesLayer.addLayer(layer);
-                        } else if (feature.geometry.type === "Point" && layer) {
-                            stopsLayer.addLayer(layer);
+                        } else if (feature.geometry.type === "Point") {
+                            // Místo vykreslování zastávku jen uložíme do paměti
+                            allStopsData.push(feature);
                         }
                     }
                 });
                 
-                checkZoomLevel();
+                updateVisibleStops(); // První vykreslení zastávek
                 document.getElementById('loading').style.display = 'none';
             })
             .catch(error => {
                 document.getElementById('loading').innerText = "Chyba při načítání GeoJSON dat.";
             });
 
-        function checkZoomLevel() {
-            // ZMĚNA: Popisky se zapnou výhradně a pouze na zoomu 15
-            if (map.getZoom() === 15) {
-                if (!map.hasLayer(stopsLayer)) map.addLayer(stopsLayer);
-            } else {
-                if (map.hasLayer(stopsLayer)) map.removeLayer(stopsLayer);
-            }
+        // TOTO JE TA PROFESIONÁLNÍ OPTIMALIZACE
+        function updateVisibleStops() {
+            stopsLayer.clearLayers(); // Smažeme všechny staré HTML popisky
+            
+            // Kreslíme jen na zoomu 15
+            if (map.getZoom() < 15) return;
+
+            // Zjistíme, kam se uživatel na mapě zrovna dívá
+            const bounds = map.getBounds();
+
+            allStopsData.forEach(feature => {
+                const coords = feature.geometry.coordinates;
+                const latlng = L.latLng(coords[1], coords[0]);
+
+                // Pokud je zastávka fyzicky uvnitř obrazovky, vytvoříme jí popisek
+                if (bounds.contains(latlng)) {
+                    const rawZone = feature.properties.zone || "";
+                    const vZones = rawZone.split(',').map(z => z.trim()).filter(z => z.startsWith('V'));
+
+                    if (vZones.length > 0) {
+                        const fullLabelText = feature.properties.name + " [" + vZones.join(',') + "]";
+
+                        const marker = L.circleMarker(latlng, {
+                            radius: 4, color: '#fff', weight: 1.5, fillColor: '#58d68d', fillOpacity: 1
+                        }).bindTooltip(fullLabelText, { 
+                            permanent: true, direction: 'top', className: 'stop-label', offset: [0, -5]
+                        });
+                        
+                        stopsLayer.addLayer(marker);
+                    }
+                }
+            });
         }
 
-        map.on('zoomend', checkZoomLevel);
+        // Kdykoliv uživatel pohne mapou nebo zazoomuje, překreslíme jen to, co vidí
+        map.on('moveend', updateVisibleStops);
+        map.on('zoomend', updateVisibleStops);
     </script>
 </body>
 </html>
