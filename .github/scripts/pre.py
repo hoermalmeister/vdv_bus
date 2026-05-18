@@ -5,15 +5,23 @@ import time
 import os
 import math
 from shapely.geometry import LineString
+from collections import Counter
 
 BASE_URL = "https://hoermalmeister.github.io/gtfs-rehost/vdv/"
 CACHE_FILE = "osrm_cache.json"
 
+NEON_COLORS = ['#ff3366', '#33ff66', '#ff9933', '#33ccff', '#cc33ff', '#ffff33', '#ff33ff', '#33ffff', '#ff6666', '#66ff66', '#ffb366', '#66b3ff', '#ff99ff', '#99ffff']
+# Velké uzly, kde je potkání barev povoleno (ignorujeme je při barvení)
+HUBS = ['jihlav', 'třebíč', 'žďár', 'nové město', 'pelhřimov', 'humpolec', 'brod']
+
 def get_clean_group(name):
     digits = ''.join(filter(str.isdigit, str(name)))
-    if digits:
-        return str(int(digits[-3:]))
+    if digits: return str(int(digits[-3:]))
     return str(name).strip()[-3:]
+
+def is_hub(stop_name):
+    name_lower = str(stop_name).lower()
+    return any(hub in name_lower for hub in HUBS)
 
 print("Stahuji data z GitHubu...")
 routes = pd.read_csv(BASE_URL + "routes.txt")
@@ -41,13 +49,10 @@ stop_times.sort_values(by=['trip_id', 'stop_sequence'], inplace=True)
 stop_times['next_stop'] = stop_times.groupby('trip_id')['base_stop'].shift(-1)
 
 segments = stop_times.dropna(subset=['next_stop']).copy()
-
-# Kanonický pár zastávek - OPRAVA: POUŽITO @@@
 segments['canonical_pair'] = segments.apply(
     lambda r: f"{min(r['base_stop'], r['next_stop'])}@@@{max(r['base_stop'], r['next_stop'])}", axis=1
 )
 
-# Mapa: Které linky (skupiny) projíždí tímto konkrétním úsekem
 pair_groups = segments.groupby('canonical_pair')['group'].apply(lambda x: sorted(list(set(x)))).to_dict()
 
 osrm_cache = {}
@@ -57,13 +62,8 @@ if os.path.exists(CACHE_FILE):
 
 print("Fáze 1: Routování mezizastávkových úseků přes OSRM...")
 api_calls = 0
-total_pairs = len(pair_groups)
-
-for i, pair_id in enumerate(pair_groups.keys(), 1):
-    if i % 100 == 0: print(f"Zpracováno {i}/{total_pairs} úseků...")
+for pair_id in pair_groups.keys():
     if pair_id in osrm_cache: continue
-    
-    # OPRAVA: ZDE TAKÉ @@@
     s1, s2 = pair_id.split('@@@')
     if s1 not in stops_clean.index or s2 not in stops_clean.index: continue
     
@@ -91,67 +91,92 @@ if api_calls > 0:
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(osrm_cache, f, ensure_ascii=False, allow_nan=False)
 
-print("Fáze 2: Výpočet paralelních offsetů...")
-group_features = {}
+print("Fáze 2: Inteligentní barvení sítě (Graph Coloring)...")
+group_to_stops = {}
+for _, row in stop_times.iterrows():
+    grp = row['group']
+    st_id = row['base_stop']
+    if st_id in stops_clean.index:
+        st_name = stops_clean.loc[st_id, 'stop_name']
+        if not is_hub(st_name): # Ignorujeme velké uzly!
+            if grp not in group_to_stops: group_to_stops[grp] = set()
+            group_to_stops[grp].add(st_id)
 
+groups_list = list(group_to_stops.keys())
+graph = {g: set() for g in groups_list}
+
+# Vytvoření vztahů mezi linkami (pokud sdílí malou zastávku = nesmí mít stejnou barvu)
+for i in range(len(groups_list)):
+    for j in range(i + 1, len(groups_list)):
+        if group_to_stops[groups_list[i]].intersection(group_to_stops[groups_list[j]]):
+            graph[groups_list[i]].add(groups_list[j])
+            graph[groups_list[j]].add(groups_list[i])
+
+group_colors = {}
+# Barvíme nejdřív ty nejpropletenější linky
+sorted_groups = sorted(groups_list, key=lambda x: len(graph[x]), reverse=True)
+
+for g in sorted_groups:
+    used_colors = {group_colors[n] for n in graph[g] if n in group_colors}
+    available_colors = [c for c in NEON_COLORS if c not in used_colors]
+    if available_colors:
+        group_colors[g] = available_colors[0]
+    else:
+        # Fallback pokud dojdou barvy (což se stane málokdy): vezmeme tu nejméně konfliktní
+        counts = Counter([group_colors[n] for n in graph[g] if n in group_colors])
+        group_colors[g] = min(NEON_COLORS, key=lambda c: counts.get(c, 0))
+
+# Fallback pro linky, které nejezdí mimo Huby
+for grp in route_group_map.values():
+    if grp not in group_colors:
+        group_colors[grp] = NEON_COLORS[sum(ord(c) for c in str(grp)) % len(NEON_COLORS)]
+
+print("Fáze 3: Výpočet paralelních offsetů...")
+group_features = {}
 for pair_id, groups in pair_groups.items():
     if pair_id not in osrm_cache: continue
-    
     coords = osrm_cache[pair_id]
     clean_coords = [[lon, lat] for lon, lat in coords if pd.notna(lon) and pd.notna(lat)]
     if len(clean_coords) < 2: continue
     
-    # Převod geometrie na metry
     lat_mid = clean_coords[0][1]
     lon_scale = math.cos(math.radians(lat_mid))
     m_coords = [(lon * 111320 * lon_scale, lat * 111320) for lon, lat in clean_coords]
     line = LineString(m_coords)
-    
     num_groups = len(groups)
     
     for idx, group in enumerate(groups):
-        # Dynamický posun - linky se rozestoupí přesně podle toho, kolik jich tu reálně jede
         offset_multiplier = idx - (num_groups - 1) / 2.0
-        offset_meters = offset_multiplier * 20 # 20 metrů mezera mezi linkami
-        
-        if offset_meters == 0:
-            out_coords = m_coords
+        offset_meters = offset_multiplier * 20 
+        if offset_meters == 0: out_coords = m_coords
         else:
             try:
-                # Aplikace posunu na tento krátký a hladký úsek. join_style=1 krásně vyhladí rohy
                 off_line = line.offset_curve(offset_meters, join_style=1)
-                if off_line.geom_type == 'LineString':
-                    out_coords = list(off_line.coords)
+                if off_line.geom_type == 'LineString': out_coords = list(off_line.coords)
                 elif off_line.geom_type == 'MultiLineString':
                     out_coords = []
                     for part in off_line.geoms: out_coords.extend(list(part.coords))
-                else:
-                    out_coords = m_coords
-            except Exception:
-                out_coords = m_coords
+                else: out_coords = m_coords
+            except: out_coords = m_coords
                 
-        # Převod zpět z metrů na GPS
         final_coords = [[round(x / (111320 * lon_scale), 5), round(y / 111320, 5)] for x, y in out_coords]
-        
-        if group not in group_features:
-            group_features[group] = []
+        if group not in group_features: group_features[group] = []
         group_features[group].append(final_coords)
 
 features = []
 for group, lines in group_features.items():
     features.append({
         "type": "Feature",
-        "properties": { "group": group },
+        # NYNÍ ZDE UKLÁDÁME VYPOCÍTANOU BARVU
+        "properties": { "group": group, "color": group_colors[group] },
         "geometry": { "type": "MultiLineString", "coordinates": lines }
     })
 
-# Zastávky (pouze ty, co mají smysl)
 for idx, row in stops_clean.iterrows():
     features.append({
         "type": "Feature",
         "properties": { 
-            "type": "stop", 
-            "name": row['stop_name'],
+            "type": "stop", "name": row['stop_name'],
             "zone": str(row['zone_id']) if pd.notna(row['zone_id']) else ""
         },
         "geometry": { "type": "Point", "coordinates": [row['stop_lon'], row['stop_lat']] }
