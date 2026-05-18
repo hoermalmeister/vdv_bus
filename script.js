@@ -1,9 +1,10 @@
+// --- 1. GLOBÁLNÍ PROMĚNNÉ A ČTENÍ URL ---
 let startZoom = 10;
 let startLat = 49.4;
 let startLng = 15.6;
 let initialRoute = null;
 let isRealtimeMode = false;
-let selectedVehicleId = null; // NOVÉ: Pamatuje si vybrané vozidlo
+let selectedVehicleId = null;
 let rtInterval = null;
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -14,9 +15,12 @@ if (urlParams.has('line')) initialRoute = urlParams.get('line');
 if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
 if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
 
+// --- 2. INICIALIZACE MAPY ---
 const map = L.map('map', { preferCanvas: true, minZoom: 10, maxZoom: 15 }).setView([startLat, startLng], startZoom); 
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: '© OSMC', minZoom: 10, maxZoom: 15 }).addTo(map);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { 
+    attribution: '© OpenStreetMap © CARTO', minZoom: 10, maxZoom: 15 
+}).addTo(map);
 
 const linesLayer = L.layerGroup().addTo(map);
 const routeBadgesLayer = L.layerGroup().addTo(map); 
@@ -30,11 +34,13 @@ let activeRouteGroup = null;
 
 // --- POMOCNÁ FUNKCE PRO BEZPEČNÉ STAHOVÁNÍ HTML PŘES PROXY ---
 async function fetchKrajskeHtml(url) {
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
+    if (!res.ok) throw new Error("Chyba při stahování HTML");
     return await res.text();
 }
 
+// --- 3. AKTUALIZACE URL ---
 function updateURL() {
     const center = map.getCenter();
     const params = new URLSearchParams();
@@ -50,7 +56,7 @@ function updateURL() {
     window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
-// Zvýraznění trasy (Nyní funguje i v RT módu pro zobrazení trasy konkrétního vozidla)
+// --- 4. ZVÝRAZNĚNÍ TRASY (FOCUS MÓD) ---
 function highlightRoute(group) {
     activeRouteGroup = group;
     linesLayer.eachLayer(layer => {
@@ -67,13 +73,15 @@ function highlightRoute(group) {
     updateURL();
 }
 
+// Kliknutí do prázdné mapy zruší výběry
 map.on('click', function() {
-    // Kliknutí do prázdna zruší výběry
-    if (activeRouteGroup !== null) highlightRoute(null);
+    if (activeRouteGroup !== null && !selectedVehicleId) highlightRoute(null);
     if (selectedVehicleId !== null) {
         selectedVehicleId = null;
+        if (isRealtimeMode) highlightRoute(null); // Zhasne trasu vozidla
         updateURL();
-        document.getElementById('mobile-bottom-bar').classList.add('hidden');
+        const bottomBar = document.getElementById('mobile-bottom-bar');
+        if(bottomBar) bottomBar.classList.add('hidden');
     }
 });
 
@@ -88,31 +96,36 @@ function updateAllBadgeSizes() {
     document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, map.getZoom()));
 }
 
-// --- PŘEPÍNAČ ŽIVÉ MAPY ---
+// --- 5. PŘEPÍNAČ ŽIVÉ MAPY ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
     
     if (isRealtimeMode) {
-        btn.classList.add('active');
-        if(!selectedVehicleId) highlightRoute(null); // Ztlumí linky, pokud není žádná vybraná
+        if(btn) btn.classList.add('active');
+        if(!selectedVehicleId) highlightRoute(null);
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
-        btn.classList.remove('active');
+        if(btn) btn.classList.remove('active');
         clearInterval(rtInterval);
         liveVehiclesLayer.clearLayers();
         liveVehicleMarkers = {};
-        document.getElementById('mobile-bottom-bar').classList.add('hidden');
+        
+        const bottomBar = document.getElementById('mobile-bottom-bar');
+        if(bottomBar) bottomBar.classList.add('hidden');
         selectedVehicleId = null;
-        highlightRoute(initialRoute || null); // Vrátí linky zpět
+        
+        highlightRoute(initialRoute || null); 
     }
     updateURL();
 }
 
-document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
+if(document.getElementById('rt-btn')) {
+    document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
+}
 
-// Načítání GeoJSON tras
+// --- 6. NAČÍTÁNÍ GEOJSON DAT Z PYTHONU ---
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
@@ -123,7 +136,10 @@ fetch('trasy.geojson?t=' + new Date().getTime())
             onEachFeature: function (feature, layer) {
                 const props = feature.properties;
                 if (feature.geometry.type === "MultiLineString") {
-                    layer.on('click', function(e) { L.DomEvent.stopPropagation(e); if(!isRealtimeMode) highlightRoute(activeRouteGroup === props.group ? null : props.group); });
+                    layer.on('click', function(e) { 
+                        L.DomEvent.stopPropagation(e); 
+                        if(!isRealtimeMode) highlightRoute(activeRouteGroup === props.group ? null : props.group); 
+                    });
                     linesLayer.addLayer(layer);
                 } else if (props.type === "badge") {
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
@@ -131,7 +147,10 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                     badgeTooltip.on('add', function(e) {
                         const el = e.target.getElement();
                         el.style.borderColor = props.color; el.style.cursor = 'pointer'; el.style.pointerEvents = 'auto';
-                        el.onclick = function(domEvent) { domEvent.stopPropagation(); if(!isRealtimeMode) highlightRoute(activeRouteGroup === props.group ? null : props.group); };
+                        el.onclick = function(domEvent) { 
+                            domEvent.stopPropagation(); 
+                            if(!isRealtimeMode) highlightRoute(activeRouteGroup === props.group ? null : props.group); 
+                        };
                         adjustBadgeSize(el, map.getZoom());
                     });
                     allBadges.push({ layer: badgeTooltip, latlng: latlng, group: props.group });
@@ -145,11 +164,17 @@ fetch('trasy.geojson?t=' + new Date().getTime())
         });
         
         document.getElementById('loading').style.display = 'none';
+        
         if (isRealtimeMode) toggleRealtimeMode(true);
         else if (initialRoute) highlightRoute(initialRoute);
         else renderVisibleElements();
+    })
+    .catch(error => {
+        document.getElementById('loading').innerText = "Chyba při načítání trasy.geojson. Zkontrolujte konzoli (F12).";
+        console.error("GeoJSON Error:", error);
     });
 
+// --- 7. RENDEROVACÍ LOOP ---
 function renderVisibleElements() {
     const bounds = map.getBounds().pad(0.1);
     allBadges.forEach(badge => {
@@ -169,17 +194,23 @@ function renderVisibleElements() {
 map.on('moveend', function() { renderVisibleElements(); updateURL(); });
 map.on('zoomend', function() { renderVisibleElements(); updateAllBadgeSizes(); updateURL(); });
 
+// --- 8. GPS LOKALIZACE ---
+let userMarker = null;
+const locateBtn = document.getElementById('locate-btn');
+if(locateBtn) locateBtn.addEventListener('click', () => map.locate({ setView: true, maxZoom: 14 }));
+map.on('locationfound', function(e) {
+    if (!userMarker) userMarker = L.circleMarker(e.latlng, { radius: 7, color: '#fff', weight: 2, fillColor: '#3388ff', fillOpacity: 1 }).addTo(map);
+    else userMarker.setLatLng(e.latlng);
+});
 
-// --- MODÁLNÍ OKNA A JÍZDNÍ ŘÁDY ---
 
-// Tuto funkci zavolá tlačítko v krajském HTML, které jsme pomocí Regexu upravili
+// --- 9. MODÁLNÍ OKNA A JÍZDNÍ ŘÁDY ---
 window.openTimetable = async function(vehicleId) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
     
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
-        // Přepíšeme krajské funkce na naše zavírací
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
         document.getElementById('timetable-modal-content').innerHTML = cleanHtml;
     } catch(e) {
@@ -191,71 +222,55 @@ window.closeTimetable = function() {
     document.getElementById('timetable-modal').classList.add('hidden');
 };
 
-// Logika kliknutí na vozidlo
 async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
 
-    // 1. Zvýrazníme trasu na mapě (získáme číslo linky)
-    const shortLine = v.text.replace(/\D/g, ''); 
+    const shortLine = v.text.replace(/\D/g, '').slice(-3); 
     highlightRoute(shortLine);
 
-    // 2. Stáhneme HTML pro Info Window
-    let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`);
-    
-    // Přepíšeme krajské onclick na naše openTimetable(id)
-    let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((\d+),\s*\d+\)/g, 'openTimetable($1)');
+    try {
+        let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`);
+        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((\d+),\s*\d+\)/g, 'openTimetable($1)');
 
-    const isMobile = window.innerWidth <= 768;
+        const isMobile = window.innerWidth <= 768;
 
-    if (isMobile) {
-        // Na mobilu zobrazíme spodní lištu
-        const bar = document.getElementById('mobile-bottom-bar');
-        document.getElementById('mobile-bar-content').innerHTML = cleanHtml;
-        bar.classList.remove('hidden');
-        
-        // Kliknutí kamkoliv na lištu (kromě tlačítka) otevře rovnou jízdní řád
-        bar.onclick = function(e) {
-            if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I') {
-                openTimetable(v.id);
-            }
-        };
-    } else {
-        // Na PC otevřeme klasický Leaflet Popup přímo nad bodem
-        L.popup()
-            .setLatLng([v.lat, v.lng])
-            .setContent(cleanHtml)
-            .openOn(map);
+        if (isMobile) {
+            const bar = document.getElementById('mobile-bottom-bar');
+            document.getElementById('mobile-bar-content').innerHTML = cleanHtml;
+            bar.classList.remove('hidden');
+            
+            bar.onclick = function(e) {
+                if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
+                    openTimetable(v.id);
+                }
+            };
+        } else {
+            L.popup()
+                .setLatLng([v.lat, v.lng])
+                .setContent(cleanHtml)
+                .openOn(map);
+        }
+    } catch(e) {
+        console.error("Nelze načíst detail vozidla", e);
     }
 }
 
-
-// --- ENGINE PRO ŽIVÁ VOZIDLA ---
+// --- 10. ENGINE PRO ŽIVÁ VOZIDLA (CORS PROXY FIX + CACHE BUSTER) ---
 async function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
     try {
-        // 1. Cache Buster: Přidáme k URL aktuální čas, aby nám proxy nevracela stará data
         const timestamp = new Date().getTime();
         const targetUrl = `https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=${timestamp}`;
-        
-        // 2. Použití spolehlivější CORS proxy
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
         
         const response = await fetch(proxyUrl);
-        
-        if (!response.ok) {
-            throw new Error(`Chyba serveru: ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`Chyba serveru: ${response.status}`);
 
         const data = await response.json();
-        
-        // Pomůcka pro tebe: Pokud otevřeš F12 (Konzoli), uvidíš, jestli data reálně chodí
-        console.log("Staženo živých vozidel:", data.length);
-
         const activeIds = new Set(data.map(v => v.id));
         
-        // Odstranění vozidel, která zmizela z API
         for (let id in liveVehicleMarkers) {
             if (!activeIds.has(parseInt(id))) {
                 liveVehiclesLayer.removeLayer(liveVehicleMarkers[id]);
@@ -263,7 +278,6 @@ async function fetchLiveVehicles() {
             }
         }
 
-        // Vykreslení vozidel
         data.forEach(v => {
             const isTrain = v.traction === 'TRAIN';
             const shapeClass = isTrain ? 'train' : 'bus';
@@ -273,9 +287,7 @@ async function fetchLiveVehicles() {
             else if (v.delay > 0 && v.delay <= 9) delayClass = 'delay-warn';
             else if (v.delay >= 10) delayClass = 'delay-alert';
 
-            // Získáme jen číslice (např. 842117 -> 117)
             const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
-
             const iconHtml = `<div class="live-vehicle ${shapeClass} ${delayClass}">${shortLine}</div>`;
 
             if (liveVehicleMarkers[v.id]) {
@@ -283,22 +295,16 @@ async function fetchLiveVehicles() {
                 liveVehicleMarkers[v.id].setIcon(L.divIcon({ className: '', html: iconHtml, iconSize: [28, 28], iconAnchor: [14, 14] }));
             } else {
                 const marker = L.marker([v.lat, v.lng], { icon: L.divIcon({ className: '', html: iconHtml, iconSize: [28, 28], iconAnchor: [14, 14] }) });
-                
-                marker.on('click', function() {
-                    handleVehicleClick(v);
-                });
-
+                marker.on('click', () => handleVehicleClick(v));
                 liveVehiclesLayer.addLayer(marker);
                 liveVehicleMarkers[v.id] = marker;
             }
 
-            // Automatické otevření, pokud je ID v URL
-            if (selectedVehicleId === v.id && document.getElementById('mobile-bottom-bar').classList.contains('hidden')) {
+            if (selectedVehicleId === v.id && document.getElementById('mobile-bottom-bar') && document.getElementById('mobile-bottom-bar').classList.contains('hidden')) {
                 handleVehicleClick(v);
             }
         });
     } catch (e) {
-        console.error("Chyba RT dat (Pravděpodobně blokace proxy):", e);
+        console.error("Chyba RT dat:", e);
     }
-}
 }
