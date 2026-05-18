@@ -205,4 +205,24 @@ body, html {
 .level { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
 .is-hidden { display: none !important; }
 .has-text-centered { text-align: center !important; }
+
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background: rgba(20, 20, 20, 0.95) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.8);
+}
+.leaflet-popup-content {
+    margin: 14px;
+}
+.leaflet-popup-close-button {
+    color: #aaa !important;
+}
+.leaflet-popup-close-button:hover {
+    color: #fff !important;
+}
+
+/* Ladění barev uvnitř tabulek (v bublině i na mobilu) */
+.table th { color: #aaa !important; font-weight: normal; }
+.table td { color: #fff !important; font-weight: bold; }
 .legendDot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
