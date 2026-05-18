@@ -42,8 +42,7 @@ function highlightRoute(group) {
             layer.setStyle({ opacity: 1, weight: 6 });
             if (layer.bringToFront) layer.bringToFront();
         } else {
-            // Ostatní linky -> zprůhlednit na režim "duchů"
-            layer.setStyle({ opacity: 0.05, weight: 3 }); 
+            layer.setStyle({ opacity: 0.1, weight: 3 }); 
         }
     });
 
