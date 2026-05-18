@@ -1,9 +1,9 @@
-// --- 1. ČTENÍ URL PŘI STARTU ---
 let startZoom = 10;
 let startLat = 49.4;
 let startLng = 15.6;
 let initialRoute = null;
 let isRealtimeMode = false;
+let rtInterval = null; // Bude držet časovač pro refresh vozidel
 
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.has('z')) startZoom = parseInt(urlParams.get('z'), 10);
@@ -12,12 +12,7 @@ if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
 if (urlParams.has('line')) initialRoute = urlParams.get('line');
 if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
 
-// Inicializace mapy
-const map = L.map('map', { 
-    preferCanvas: true,
-    minZoom: 10,
-    maxZoom: 15
-}).setView([startLat, startLng], startZoom); 
+const map = L.map('map', { preferCanvas: true, minZoom: 10, maxZoom: 15 }).setView([startLat, startLng], startZoom); 
 
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: '© OpenStreetMap © CARTO',
@@ -27,70 +22,60 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 const linesLayer = L.layerGroup().addTo(map);
 const routeBadgesLayer = L.layerGroup().addTo(map); 
 const stopsLayer = L.layerGroup().addTo(map); 
-const liveVehiclesLayer = L.layerGroup().addTo(map); // Zcela nová vrstva pro vozidla
+const liveVehiclesLayer = L.layerGroup().addTo(map);
 
 let allBadges = [];
 let allStops = [];
-let liveVehicleMarkers = {}; // Drží v paměti ID vozidel, aby s nimi šlo hýbat
+let liveVehicleMarkers = {}; 
 let activeRouteGroup = null;
 
-// --- 2. ZAPISOVÁNÍ DO URL PŘI POHYBU ---
+// --- AKTUALIZACE URL ---
 function updateURL() {
     const center = map.getCenter();
     const zoom = map.getZoom();
-    
     const params = new URLSearchParams();
+    
     params.set('x', center.lng.toFixed(4));
     params.set('y', center.lat.toFixed(4));
     params.set('z', zoom);
     
-    if (activeRouteGroup && !isRealtimeMode) params.set('line', activeRouteGroup);
-    if (isRealtimeMode) params.set('rt', '1');
+    if (isRealtimeMode) {
+        params.set('rt', '1');
+    } else if (activeRouteGroup) {
+        params.set('line', activeRouteGroup);
+    }
     
-    const newUrl = window.location.pathname + '?' + params.toString();
-    window.history.replaceState(null, '', newUrl);
+    window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
-// FOCUS MÓD (Modifikován pro Live mapu)
+// --- FOCUS MÓD (Nyní ignoruje klikání, když je zapnutý RT mód) ---
 function highlightRoute(group) {
-    if (isRealtimeMode) {
-        // V Realtime módu Focus vůbec nepustíme, vše ztlumíme na 10 %
-        activeRouteGroup = null;
-        linesLayer.eachLayer(layer => layer.setStyle({ opacity: 0.10, weight: 3 }));
-    } else {
-        // Klasická logika
-        activeRouteGroup = group;
-        linesLayer.eachLayer(layer => {
-            if (!activeRouteGroup) {
-                layer.setStyle({ opacity: 0.9, weight: 4 });
-            } else if (layer.feature.properties.group === activeRouteGroup) {
-                layer.setStyle({ opacity: 1, weight: 6 });
-                if (layer.bringToFront) layer.bringToFront();
-            } else {
-                layer.setStyle({ opacity: 0.10, weight: 3 }); 
-            }
-        });
-    }
+    if (isRealtimeMode) return; // V živé mapě nelze vybírat linky
+    
+    activeRouteGroup = group;
+    linesLayer.eachLayer(layer => {
+        if (!activeRouteGroup) layer.setStyle({ opacity: 0.9, weight: 4 });
+        else if (layer.feature.properties.group === activeRouteGroup) {
+            layer.setStyle({ opacity: 1, weight: 6 });
+            if (layer.bringToFront) layer.bringToFront();
+        } 
+        else layer.setStyle({ opacity: 0.10, weight: 3 }); 
+    });
 
     renderVisibleElements(); 
     updateURL();
 }
 
 map.on('click', function() {
-    if (activeRouteGroup !== null) highlightRoute(null);
+    if (activeRouteGroup !== null && !isRealtimeMode) highlightRoute(null);
 });
 
-// Změna velikosti štítků podle zoomu
 function adjustBadgeSize(element, zoom) {
     const fontSize = 6 + (zoom - 10); 
     element.style.fontSize = fontSize + 'px';
-    if (zoom <= 11) {
-        element.style.padding = '0px 2px'; element.style.borderWidth = '1px';
-    } else if (zoom <= 13) {
-        element.style.padding = '1px 3px'; element.style.borderWidth = '1.5px';
-    } else {
-        element.style.padding = '2px 5px'; element.style.borderWidth = '2px';
-    }
+    if (zoom <= 11) { element.style.padding = '0px 2px'; element.style.borderWidth = '1px'; } 
+    else if (zoom <= 13) { element.style.padding = '1px 3px'; element.style.borderWidth = '1.5px'; } 
+    else { element.style.padding = '2px 5px'; element.style.borderWidth = '2px'; }
 }
 
 function updateAllBadgeSizes() {
@@ -98,81 +83,83 @@ function updateAllBadgeSizes() {
     document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, currentZoom));
 }
 
-// NAČÍTÁNÍ PŘEDŽVÝKANÝCH DAT Z PYTHONU
+// --- PŘEPÍNAČ ŽIVÉ MAPY ---
+function toggleRealtimeMode(forceState = null) {
+    isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
+    const btn = document.getElementById('rt-btn');
+    
+    if (isRealtimeMode) {
+        btn.classList.add('active');
+        activeRouteGroup = null; // Zrušíme výběr linky
+        linesLayer.eachLayer(layer => layer.setStyle({ opacity: 0.10, weight: 3 }));
+        
+        fetchLiveVehicles();
+        rtInterval = setInterval(fetchLiveVehicles, 10000);
+    } else {
+        btn.classList.remove('active');
+        clearInterval(rtInterval);
+        liveVehiclesLayer.clearLayers();
+        liveVehicleMarkers = {};
+        
+        // Vrátíme linky do normálu
+        linesLayer.eachLayer(layer => layer.setStyle({ opacity: 0.9, weight: 4 }));
+    }
+    
+    renderVisibleElements();
+    updateURL();
+}
+
+document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
+
+// --- NAČÍTÁNÍ GEOJSONU ---
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
         L.geoJSON(data, {
             style: function(feature) {
                 if (feature.geometry.type === "MultiLineString") {
-                    // Inicializační vrstva (změní se hned po načtení přes highlightRoute)
                     return { color: feature.properties.color, weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round' };
                 }
             },
             onEachFeature: function (feature, layer) {
                 const props = feature.properties;
-
                 if (feature.geometry.type === "MultiLineString") {
                     layer.on('click', function(e) {
                         L.DomEvent.stopPropagation(e);
-                        // Klikání ignorujeme v realtime módu
-                        if (!isRealtimeMode) highlightRoute(activeRouteGroup === props.group ? null : props.group);
+                        highlightRoute(activeRouteGroup === props.group ? null : props.group);
                     });
                     linesLayer.addLayer(layer);
-
                 } else if (props.type === "badge") {
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
-
-                    const badgeTooltip = L.tooltip(latlng, {
-                        permanent: true, direction: 'center', className: 'route-map-badge', interactive: true
-                    }).setContent(props.group);
+                    const badgeTooltip = L.tooltip(latlng, { permanent: true, direction: 'center', className: 'route-map-badge', interactive: true }).setContent(props.group);
 
                     badgeTooltip.on('add', function(e) {
                         const el = e.target.getElement();
                         el.style.borderColor = props.color;
-                        el.style.cursor = 'pointer';
-                        el.style.pointerEvents = 'auto';
-                        
-                        el.onclick = function(domEvent) {
-                            domEvent.stopPropagation();
-                            if (!isRealtimeMode) highlightRoute(activeRouteGroup === props.group ? null : props.group);
-                        };
-
+                        el.style.cursor = 'pointer'; el.style.pointerEvents = 'auto';
+                        el.onclick = function(domEvent) { domEvent.stopPropagation(); highlightRoute(activeRouteGroup === props.group ? null : props.group); };
                         adjustBadgeSize(el, map.getZoom());
                     });
-
                     allBadges.push({ layer: badgeTooltip, latlng: latlng, group: props.group });
-
                 } else if (props.type === "stop" && props.show_label) {
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
-
-                    const htmlContent = `
-                        <span class="stop-dot"></span>
-                        <span>${props.name}</span>
-                        <span class="stop-zone-text">${props.zones_formatted}</span>
-                    `;
-
-                    const marker = L.circleMarker(latlng, {
-                        radius: 4, color: '#fff', weight: 1.5, fillColor: '#58d68d', fillOpacity: 1
-                    }).bindTooltip(htmlContent, { 
-                        permanent: true, direction: 'top', className: 'modern-stop-label', offset: [0, -6]
-                    });
-                    
+                    const htmlContent = `<span class="stop-dot"></span><span>${props.name}</span><span class="stop-zone-text">${props.zones_formatted}</span>`;
+                    const marker = L.circleMarker(latlng, { radius: 4, color: '#fff', weight: 1.5, fillColor: '#58d68d', fillOpacity: 1 }).bindTooltip(htmlContent, { permanent: true, direction: 'top', className: 'modern-stop-label', offset: [0, -6] });
                     allStops.push({ layer: marker, latlng: latlng });
                 }
             }
         });
         
-        // Okamžité aplikování filtrů z URL po stažení GeoJSONu
-        highlightRoute(initialRoute);
         document.getElementById('loading').style.display = 'none';
-    })
-    .catch(error => {
-        document.getElementById('loading').innerText = "Chyba při načítání dat tras.";
-        console.error(error);
-    });
 
-// RENDEROVACÍ LOOP
+        // Aplikujeme stavy z URL
+        if (isRealtimeMode) toggleRealtimeMode(true);
+        else if (initialRoute) highlightRoute(initialRoute);
+        else renderVisibleElements();
+    })
+    .catch(error => { console.error("Chyba při načítání GeoJSON:", error); });
+
+// --- RENDER LOOP ---
 function renderVisibleElements() {
     const bounds = map.getBounds().pad(0.1);
     const currentZoom = map.getZoom();
@@ -180,8 +167,7 @@ function renderVisibleElements() {
     allBadges.forEach(badge => {
         const isFocused = !activeRouteGroup || activeRouteGroup === badge.group;
         const isVisible = bounds.contains(badge.latlng);
-
-        // Skryjeme štítky, pokud jsme v Live módu. Jinak normální logika.
+        // V Live módu nezobrazujeme vůbec žádné štítky linek
         if (!isRealtimeMode && isFocused && isVisible) {
             if (!routeBadgesLayer.hasLayer(badge.layer)) routeBadgesLayer.addLayer(badge.layer);
         } else {
@@ -191,56 +177,35 @@ function renderVisibleElements() {
 
     if (currentZoom >= 15) {
         allStops.forEach(stop => {
-            if (bounds.contains(stop.latlng)) {
-                if (!stopsLayer.hasLayer(stop.layer)) stopsLayer.addLayer(stop.layer);
-            } else {
-                if (stopsLayer.hasLayer(stop.layer)) stopsLayer.removeLayer(stop.layer);
-            }
+            if (bounds.contains(stop.latlng)) { if (!stopsLayer.hasLayer(stop.layer)) stopsLayer.addLayer(stop.layer); } 
+            else { if (stopsLayer.hasLayer(stop.layer)) stopsLayer.removeLayer(stop.layer); }
         });
-    } else {
-        stopsLayer.clearLayers();
-    }
+    } else { stopsLayer.clearLayers(); }
 }
 
-map.on('moveend', function() {
-    renderVisibleElements();
-    updateURL();
-});
+map.on('moveend', function() { renderVisibleElements(); updateURL(); });
+map.on('zoomend', function() { renderVisibleElements(); updateAllBadgeSizes(); updateURL(); });
 
-map.on('zoomend', function() {
-    renderVisibleElements();
-    updateAllBadgeSizes();
-    updateURL();
-});
-
-
-// --- 3. GPS LOKALIZACE UŽIVATELE ---
+// --- LOKALIZACE UŽIVATELE ---
 let userMarker = null;
-const locateBtn = document.getElementById('locate-btn');
-if (locateBtn) {
-    locateBtn.addEventListener('click', () => {
-        map.locate({ setView: true, maxZoom: 14 });
-    });
-}
-
+document.getElementById('locate-btn').addEventListener('click', () => map.locate({ setView: true, maxZoom: 14 }));
 map.on('locationfound', function(e) {
-    if (!userMarker) {
-        userMarker = L.circleMarker(e.latlng, { radius: 7, color: '#fff', weight: 2, fillColor: '#3388ff', fillOpacity: 1 }).addTo(map);
-    } else {
-        userMarker.setLatLng(e.latlng);
-    }
+    if (!userMarker) userMarker = L.circleMarker(e.latlng, { radius: 7, color: '#fff', weight: 2, fillColor: '#3388ff', fillOpacity: 1 }).addTo(map);
+    else userMarker.setLatLng(e.latlng);
 });
 
-
-// --- 4. ENGINE PRO ŽIVÁ VOZIDLA (Spustí se pouze pokud rt=1) ---
+// --- ENGINE PRO ŽIVÁ VOZIDLA (CORS PROXY FIX) ---
 async function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
     try {
-        const response = await fetch('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints');
+        // Tímto trikem s veřejnou proxy bezpečně obejdeme CORS blokaci prohlížeče
+        const targetUrl = encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints');
+        const proxyUrl = `https://api.allorigins.win/raw?url=${targetUrl}`;
+        
+        const response = await fetch(proxyUrl);
         const data = await response.json();
 
-        // Garbage collection: Smažeme z mapy vozidla, která už z API zmizela (např. dojela do cíle)
         const activeIds = new Set(data.map(v => v.id));
         for (let id in liveVehicleMarkers) {
             if (!activeIds.has(parseInt(id))) {
@@ -257,22 +222,12 @@ async function fetchLiveVehicles() {
             let delayClass = 'delay-ok';
             let delayText = 'Na čas';
             
-            // Matematika zpoždění (předpokládáme formát v minutách)
-            if (v.delay === -2147483648) {
-                delayClass = 'delay-unknown';
-                delayText = 'Neznámé zpoždění';
-            } else if (v.delay < 0) {
-                delayText = `${Math.abs(v.delay)} min náskok`;
-            } else if (v.delay > 0 && v.delay < 10) {
-                delayClass = 'delay-warn';
-                delayText = `+${v.delay} min zpoždění`;
-            } else if (v.delay >= 10) {
-                delayClass = 'delay-alert';
-                delayText = `+${v.delay} min zpoždění`;
-            }
+            if (v.delay === -2147483648) { delayClass = 'delay-unknown'; delayText = 'Neznámé zpoždění'; } 
+            else if (v.delay < 0) { delayText = `${Math.abs(v.delay)} min náskok`; } 
+            else if (v.delay > 0 && v.delay <= 9) { delayClass = 'delay-warn'; delayText = `+${v.delay} min zpoždění`; } 
+            else if (v.delay >= 10) { delayClass = 'delay-alert'; delayText = `+${v.delay} min zpoždění`; }
 
             const dest = (v.finalStopName === '-1 N/a' || v.finalStopName.includes('N/a')) ? 'Neznámý cíl' : v.finalStopName;
-
             const iconHtml = `<div class="live-vehicle ${shapeClass} ${delayClass}">${iconSymbol}</div>`;
             const tooltipHtml = `
                 <div style="font-size: 13px; font-weight: bold; margin-bottom: 2px;">${isTrain ? 'Vlak' : 'Linka'} ${v.text}</div>
@@ -281,29 +236,17 @@ async function fetchLiveVehicles() {
             `;
 
             if (liveVehicleMarkers[v.id]) {
-                // Vozidlo už na mapě je - pouze ho hladce posuneme a aktualizujeme texty
                 liveVehicleMarkers[v.id].setLatLng([v.lat, v.lng]);
                 liveVehicleMarkers[v.id].setIcon(L.divIcon({ className: '', html: iconHtml, iconSize: [26, 26], iconAnchor: [13, 13] }));
                 liveVehicleMarkers[v.id].setTooltipContent(tooltipHtml);
             } else {
-                // Nové vozidlo
-                const marker = L.marker([v.lat, v.lng], {
-                    icon: L.divIcon({ className: '', html: iconHtml, iconSize: [26, 26], iconAnchor: [13, 13] })
-                }).bindTooltip(tooltipHtml, {
-                    permanent: false, direction: 'top', className: 'vehicle-tooltip', offset: [0, -14]
-                });
+                const marker = L.marker([v.lat, v.lng], { icon: L.divIcon({ className: '', html: iconHtml, iconSize: [26, 26], iconAnchor: [13, 13] }) })
+                    .bindTooltip(tooltipHtml, { permanent: false, direction: 'top', className: 'vehicle-tooltip', offset: [0, -14] });
                 liveVehiclesLayer.addLayer(marker);
                 liveVehicleMarkers[v.id] = marker;
             }
         });
-
     } catch (e) {
         console.error("Nelze načíst realtime data vozidel:", e);
     }
-}
-
-// Spustíme první načtení a pak loop každých 10 vteřin
-if (isRealtimeMode) {
-    fetchLiveVehicles();
-    setInterval(fetchLiveVehicles, 10000); 
 }
