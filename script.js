@@ -1,9 +1,23 @@
+// --- 1. ČTENÍ URL PŘI STARTU (Query Parametry: ?x=...&y=...&z=...&line=...) ---
+let startZoom = 10;
+let startLat = 49.4;
+let startLng = 15.6;
+let initialRoute = null;
+
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.has('z')) startZoom = parseInt(urlParams.get('z'), 10);
+if (urlParams.has('y')) startLat = parseFloat(urlParams.get('y'));
+if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
+if (urlParams.has('line')) initialRoute = urlParams.get('line');
+
+// Inicializace mapy s hodnotami z URL
 const map = L.map('map', { 
     preferCanvas: true,
     minZoom: 10,
     maxZoom: 15
-}).setView([49.4, 15.6], 10); 
+}).setView([startLat, startLng], startZoom); 
 
+// Tmavé podklady
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: '© OpenStreetMap © CARTO',
     minZoom: 10, maxZoom: 15
@@ -13,10 +27,28 @@ const linesLayer = L.layerGroup().addTo(map);
 const routeBadgesLayer = L.layerGroup().addTo(map); 
 const stopsLayer = L.layerGroup().addTo(map); 
 
-// ŠUPLÍKY PRO ULOŽENÍ VŠECH PRVKŮ MIMO OBRAZOVKU
 let allBadges = [];
 let allStops = [];
 let activeRouteGroup = null;
+
+// --- 2. ZAPISOVÁNÍ DO URL PŘI POHYBU ---
+function updateURL() {
+    const center = map.getCenter();
+    const zoom = map.getZoom();
+    
+    const params = new URLSearchParams();
+    params.set('x', center.lng.toFixed(4));
+    params.set('y', center.lat.toFixed(4));
+    params.set('z', zoom);
+    
+    if (activeRouteGroup) {
+        params.set('line', activeRouteGroup);
+    }
+    
+    // Změní URL bez znovunačtení stránky (zachová cestu, např. /vdv_bus/)
+    const newUrl = window.location.pathname + '?' + params.toString();
+    window.history.replaceState(null, '', newUrl);
+}
 
 // FOCUS MÓD
 function highlightRoute(group) {
@@ -34,6 +66,7 @@ function highlightRoute(group) {
     });
 
     renderVisibleElements(); 
+    updateURL(); // Aktualizujeme URL při změně linky
 }
 
 map.on('click', function() {
@@ -58,6 +91,7 @@ function updateAllBadgeSizes() {
     document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, currentZoom));
 }
 
+// NAČÍTÁNÍ PŘEDŽVÝKANÝCH DAT Z PYTHONU
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
@@ -71,7 +105,6 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                 const props = feature.properties;
 
                 if (feature.geometry.type === "MultiLineString") {
-                    // ČÁRY
                     layer.on('click', function(e) {
                         L.DomEvent.stopPropagation(e);
                         highlightRoute(activeRouteGroup === props.group ? null : props.group);
@@ -79,7 +112,6 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                     linesLayer.addLayer(layer);
 
                 } else if (props.type === "badge") {
-                    // ŠTÍTKY 
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
 
                     const badgeTooltip = L.tooltip(latlng, {
@@ -92,7 +124,6 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                         el.style.cursor = 'pointer';
                         el.style.pointerEvents = 'auto';
                         
-                        // ZDE JE TA SLÍBENÁ OPRAVA (onclick místo addEventListener)
                         el.onclick = function(domEvent) {
                             domEvent.stopPropagation();
                             highlightRoute(activeRouteGroup === props.group ? null : props.group);
@@ -104,7 +135,6 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                     allBadges.push({ layer: badgeTooltip, latlng: latlng, group: props.group });
 
                 } else if (props.type === "stop" && props.show_label) {
-                    // ZASTÁVKY 
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
 
                     const htmlContent = `
@@ -126,17 +156,22 @@ fetch('trasy.geojson?t=' + new Date().getTime())
         
         renderVisibleElements(); 
         document.getElementById('loading').style.display = 'none';
+
+        // --- 3. APLIKOVÁNÍ VÝCHOZÍ LINKY Z URL ---
+        if (initialRoute) {
+            highlightRoute(initialRoute);
+        }
     })
     .catch(error => {
         document.getElementById('loading').innerText = "Chyba při načítání dat.";
         console.error(error);
     });
 
+// RENDEROVACÍ LOOP
 function renderVisibleElements() {
     const bounds = map.getBounds().pad(0.1);
     const currentZoom = map.getZoom();
 
-    // 1. ŠTÍTKY LINEK
     allBadges.forEach(badge => {
         const isFocused = !activeRouteGroup || activeRouteGroup === badge.group;
         const isVisible = bounds.contains(badge.latlng);
@@ -148,7 +183,6 @@ function renderVisibleElements() {
         }
     });
 
-    // 2. ZASTÁVKY
     if (currentZoom >= 15) {
         allStops.forEach(stop => {
             if (bounds.contains(stop.latlng)) {
@@ -162,10 +196,39 @@ function renderVisibleElements() {
     }
 }
 
-// Během tahání mapy je Leaflet plynulý. Jakmile zvedneš prst z displeje (moveend), vymažeme skryté prvky.
-map.on('moveend', renderVisibleElements);
+// Aktualizace URL při posunu mapy
+map.on('moveend', function() {
+    renderVisibleElements();
+    updateURL();
+});
 
 map.on('zoomend', function() {
     renderVisibleElements();
     updateAllBadgeSizes();
+    updateURL();
+});
+
+// --- 4. GPS LOKALIZACE UŽIVATELE ---
+let userMarker = null;
+
+document.getElementById('locate-btn').addEventListener('click', () => {
+    map.locate({ setView: true, maxZoom: 14 });
+});
+
+map.on('locationfound', function(e) {
+    if (!userMarker) {
+        userMarker = L.circleMarker(e.latlng, {
+            radius: 7,
+            color: '#fff',
+            weight: 2,
+            fillColor: '#3388ff',
+            fillOpacity: 1
+        }).addTo(map);
+    } else {
+        userMarker.setLatLng(e.latlng);
+    }
+});
+
+map.on('locationerror', function(e) {
+    alert("Nepodařilo se zjistit vaši polohu. Zkontrolujte prosím oprávnění ve vašem prohlížeči.");
 });
