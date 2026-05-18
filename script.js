@@ -235,10 +235,27 @@ async function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
     try {
-        const response = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints')}`);
+        // 1. Cache Buster: Přidáme k URL aktuální čas, aby nám proxy nevracela stará data
+        const timestamp = new Date().getTime();
+        const targetUrl = `https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=${timestamp}`;
+        
+        // 2. Použití spolehlivější CORS proxy
+        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+        
+        const response = await fetch(proxyUrl);
+        
+        if (!response.ok) {
+            throw new Error(`Chyba serveru: ${response.status}`);
+        }
+
         const data = await response.json();
+        
+        // Pomůcka pro tebe: Pokud otevřeš F12 (Konzoli), uvidíš, jestli data reálně chodí
+        console.log("Staženo živých vozidel:", data.length);
 
         const activeIds = new Set(data.map(v => v.id));
+        
+        // Odstranění vozidel, která zmizela z API
         for (let id in liveVehicleMarkers) {
             if (!activeIds.has(parseInt(id))) {
                 liveVehiclesLayer.removeLayer(liveVehicleMarkers[id]);
@@ -246,6 +263,7 @@ async function fetchLiveVehicles() {
             }
         }
 
+        // Vykreslení vozidel
         data.forEach(v => {
             const isTrain = v.traction === 'TRAIN';
             const shapeClass = isTrain ? 'train' : 'bus';
@@ -266,7 +284,6 @@ async function fetchLiveVehicles() {
             } else {
                 const marker = L.marker([v.lat, v.lng], { icon: L.divIcon({ className: '', html: iconHtml, iconSize: [28, 28], iconAnchor: [14, 14] }) });
                 
-                // Událost pro kliknutí na vozidlo
                 marker.on('click', function() {
                     handleVehicleClick(v);
                 });
@@ -275,12 +292,13 @@ async function fetchLiveVehicles() {
                 liveVehicleMarkers[v.id] = marker;
             }
 
-            // Pokud jsme web načetli s &id=... v URL a našli jsme to vozidlo, automaticky na něj klikneme
-            if (selectedVehicleId === v.id && !document.getElementById('mobile-bottom-bar').classList.contains('hidden') === false) {
+            // Automatické otevření, pokud je ID v URL
+            if (selectedVehicleId === v.id && document.getElementById('mobile-bottom-bar').classList.contains('hidden')) {
                 handleVehicleClick(v);
             }
         });
     } catch (e) {
-        console.error("Chyba RT dat:", e);
+        console.error("Chyba RT dat (Pravděpodobně blokace proxy):", e);
     }
+}
 }
