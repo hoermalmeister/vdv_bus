@@ -32,7 +32,6 @@ let allStops = [];
 let liveVehicleMarkers = {}; 
 let activeRouteGroup = null;
 
-// --- POMOCNÁ FUNKCE PRO BEZPEČNÉ STAHOVÁNÍ HTML PŘES PROXY ---
 async function fetchKrajskeHtml(url) {
     const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
@@ -56,7 +55,7 @@ function updateURL() {
     window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
-// --- 4. ZVÝRAZNĚNÍ TRASY (FOCUS MÓD) ---
+// --- 4. ZVÝRAZNĚNÍ TRASY ---
 function highlightRoute(group) {
     activeRouteGroup = group;
     linesLayer.eachLayer(layer => {
@@ -73,12 +72,11 @@ function highlightRoute(group) {
     updateURL();
 }
 
-// Kliknutí do prázdné mapy zruší výběry
 map.on('click', function() {
     if (activeRouteGroup !== null && !selectedVehicleId) highlightRoute(null);
     if (selectedVehicleId !== null) {
         selectedVehicleId = null;
-        if (isRealtimeMode) highlightRoute(null); // Zhasne trasu vozidla
+        if (isRealtimeMode) highlightRoute(null);
         updateURL();
         const bottomBar = document.getElementById('mobile-bottom-bar');
         if(bottomBar) bottomBar.classList.add('hidden');
@@ -125,7 +123,7 @@ if(document.getElementById('rt-btn')) {
     document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
 }
 
-// --- 6. NAČÍTÁNÍ GEOJSON DAT Z PYTHONU ---
+// --- 6. NAČÍTÁNÍ GEOJSON DAT ---
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
@@ -169,10 +167,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
         else if (initialRoute) highlightRoute(initialRoute);
         else renderVisibleElements();
     })
-    .catch(error => {
-        document.getElementById('loading').innerText = "Chyba při načítání trasy.geojson. Zkontrolujte konzoli (F12).";
-        console.error("GeoJSON Error:", error);
-    });
+    .catch(error => console.error("GeoJSON Error:", error));
 
 // --- 7. RENDEROVACÍ LOOP ---
 function renderVisibleElements() {
@@ -204,15 +199,61 @@ map.on('locationfound', function(e) {
 });
 
 
-// --- 9. MODÁLNÍ OKNA A JÍZDNÍ ŘÁDY ---
-window.openTimetable = async function(vehicleId) {
+// --- 9. MODÁLNÍ OKNA, JÍZDNÍ ŘÁDY A VÝPOČET ZPOŽDĚNÍ ---
+
+window.openTimetable = async function(vehicleId, delayInMinutes) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
     
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
-        document.getElementById('timetable-modal-content').innerHTML = cleanHtml;
+        
+        // Vytvoříme si v paměti DOM, abychom mohli snadno upravovat časy v tabulce
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = cleanHtml;
+        
+        // Pokud známe zpoždění (a není to nesmyslná hodnota), přidáme ho do hlavičky a upravíme časy
+        if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
+            
+            // 1. Zobrazení textu v hlavičce
+            const headerRight = tempDiv.querySelector('.level-right .level-item');
+            if (headerRight) {
+                let delayClass = delayInMinutes >= 10 ? 'delay-alert-text' : (delayInMinutes > 0 ? 'delay-warn-text' : 'delay-ok-text');
+                let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Na čas');
+                
+                const delaySpan = document.createElement('span');
+                delaySpan.style.marginLeft = "15px";
+                delaySpan.innerHTML = `Zpoždění: <b class="${delayClass}">${delayText}</b>`;
+                headerRight.appendChild(delaySpan);
+            }
+            
+            // 2. Matematický přepočet všech časů v tabulce (Přeškrtnutí starého a vypsání nového)
+            if (delayInMinutes !== 0) {
+                const timeCells = tempDiv.querySelectorAll('td.has-text-centered');
+                timeCells.forEach(cell => {
+                    const timeMatch = cell.innerText.match(/^(\d{1,2}):(\d{2})$/);
+                    if (timeMatch) {
+                        let h = parseInt(timeMatch[1], 10);
+                        let m = parseInt(timeMatch[2], 10);
+                        
+                        let totalMin = h * 60 + m + delayInMinutes;
+                        if (totalMin < 0) totalMin += 24 * 60; // Překročení půlnoci dozadu
+                        
+                        let newH = Math.floor(totalMin / 60) % 24;
+                        let newM = totalMin % 60;
+                        let newTimeStr = `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}`;
+                        
+                        let colorClass = delayInMinutes >= 10 ? 'delay-alert-text' : (delayInMinutes > 0 ? 'delay-warn-text' : 'delay-ok-text');
+                        
+                        cell.innerHTML = `<s style="color:#666; font-size: 11px; margin-right: 4px;">${cell.innerText}</s><span class="${colorClass}">${newTimeStr}</span>`;
+                    }
+                });
+            }
+        }
+        
+        document.getElementById('timetable-modal-content').innerHTML = tempDiv.innerHTML;
+        
     } catch(e) {
         document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>";
     }
@@ -231,7 +272,9 @@ async function handleVehicleClick(v) {
 
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`);
-        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((\d+),\s*\d+\)/g, 'openTimetable($1)');
+        
+        // OPRAVA: Pošleme funkci openTimetable i zpoždění vozidla (v.delay)
+        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((\d+),\s*\d+\)/g, `openTimetable($1, ${v.delay})`);
 
         const isMobile = window.innerWidth <= 768;
 
@@ -242,7 +285,7 @@ async function handleVehicleClick(v) {
             
             bar.onclick = function(e) {
                 if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
-                    openTimetable(v.id);
+                    openTimetable(v.id, v.delay);
                 }
             };
         } else {
@@ -256,7 +299,7 @@ async function handleVehicleClick(v) {
     }
 }
 
-// --- 10. ENGINE PRO ŽIVÁ VOZIDLA (CORS PROXY FIX + CACHE BUSTER) ---
+// --- 10. ENGINE PRO ŽIVÁ VOZIDLA ---
 async function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
@@ -293,6 +336,10 @@ async function fetchLiveVehicles() {
             if (liveVehicleMarkers[v.id]) {
                 liveVehicleMarkers[v.id].setLatLng([v.lat, v.lng]);
                 liveVehicleMarkers[v.id].setIcon(L.divIcon({ className: '', html: iconHtml, iconSize: [28, 28], iconAnchor: [14, 14] }));
+                
+                // Aktualizujeme data o zpoždění pro případný klik
+                liveVehicleMarkers[v.id].off('click');
+                liveVehicleMarkers[v.id].on('click', () => handleVehicleClick(v));
             } else {
                 const marker = L.marker([v.lat, v.lng], { icon: L.divIcon({ className: '', html: iconHtml, iconSize: [28, 28], iconAnchor: [14, 14] }) });
                 marker.on('click', () => handleVehicleClick(v));
