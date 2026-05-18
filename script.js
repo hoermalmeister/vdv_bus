@@ -15,6 +15,7 @@ const linesLayer = L.layerGroup().addTo(map);
 const routeBadgesLayer = L.layerGroup().addTo(map); 
 const stopsLayer = L.layerGroup().addTo(map); 
 
+// ŠUPLÍKY PRO ULOŽENÍ VŠECH PRVKŮ MIMO OBRAZOVKU
 let allBadges = [];
 let allStops = [];
 let activeRouteGroup = null;
@@ -34,7 +35,7 @@ function highlightRoute(group) {
         }
     });
 
-    renderMapElements(); 
+    renderVisibleElements(); 
 }
 
 map.on('click', function() {
@@ -59,7 +60,7 @@ function updateAllBadgeSizes() {
     document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, currentZoom));
 }
 
-// NAČÍTÁME PŘEDŽVÝKANÁ DATA Z PYTHONU
+// NAČÍTÁNÍ PŘEDŽVÝKANÝCH DAT Z PYTHONU
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
@@ -73,7 +74,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                 const props = feature.properties;
 
                 if (feature.geometry.type === "MultiLineString") {
-                    // 1. ČÁRY LINEK
+                    // ČÁRY
                     layer.on('click', function(e) {
                         L.DomEvent.stopPropagation(e);
                         highlightRoute(activeRouteGroup === props.group ? null : props.group);
@@ -81,11 +82,10 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                     linesLayer.addLayer(layer);
 
                 } else if (props.type === "badge") {
-                    // 2. ŠTÍTKY LINEK (Vytvořeny už v Pythonu)
-                    const lat = feature.geometry.coordinates[1];
-                    const lon = feature.geometry.coordinates[0];
+                    // ŠTÍTKY (Ukládáme do šuplíku allBadges, ne do mapy!)
+                    const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
 
-                    const badgeTooltip = L.tooltip([lat, lon], {
+                    const badgeTooltip = L.tooltip(latlng, {
                         permanent: true, direction: 'center', className: 'route-map-badge', interactive: true
                     }).setContent(props.group);
 
@@ -102,12 +102,11 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                         adjustBadgeSize(el, map.getZoom());
                     });
 
-                    allBadges.push({ layer: badgeTooltip, group: props.group });
+                    allBadges.push({ layer: badgeTooltip, latlng: latlng, group: props.group });
 
                 } else if (props.type === "stop" && props.show_label) {
-                    // 3. ZASTÁVKY (Zůstaly jen ty, co přežily Python filtr!)
-                    const lat = feature.geometry.coordinates[1];
-                    const lon = feature.geometry.coordinates[0];
+                    // ZASTÁVKY (Ukládáme do šuplíku allStops, ne do mapy!)
+                    const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
 
                     const htmlContent = `
                         <span class="stop-dot"></span>
@@ -115,46 +114,62 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                         <span class="stop-zone-text">${props.zones_formatted}</span>
                     `;
 
-                    // Původní dokonalý formát: Tečka (CircleMarker) s obdélníkem nahoře (Tooltip)
-                    const marker = L.circleMarker([lat, lon], {
+                    const marker = L.circleMarker(latlng, {
                         radius: 4, color: '#fff', weight: 1.5, fillColor: '#58d68d', fillOpacity: 1
                     }).bindTooltip(htmlContent, { 
                         permanent: true, direction: 'top', className: 'modern-stop-label', offset: [0, -6]
                     });
                     
-                    allStops.push(marker);
+                    allStops.push({ layer: marker, latlng: latlng });
                 }
             }
         });
         
-        renderMapElements(); 
+        renderVisibleElements(); 
         document.getElementById('loading').style.display = 'none';
     })
     .catch(error => {
-        document.getElementById('loading').innerText = "Chyba při načítání dat z Pythonu.";
+        document.getElementById('loading').innerText = "Chyba při načítání dat.";
         console.error(error);
     });
 
-// JEDINÁ RENDEROVACÍ FUNKCE BEZ MATEMATIKY
-function renderMapElements() {
-    routeBadgesLayer.clearLayers();
-    stopsLayer.clearLayers();
+// EXTRÉMNĚ RYCHLÝ RENDER LOOP - Přidává/maže pouze to, co fyzicky vidíš
+function renderVisibleElements() {
+    // Vezmeme hranice obrazovky + 10 % navíc, ať prvky neblikají přesně na okraji displeje
+    const bounds = map.getBounds().pad(0.1);
     const currentZoom = map.getZoom();
 
+    // 1. ŠTÍTKY LINEK
     allBadges.forEach(badge => {
-        if (!activeRouteGroup || activeRouteGroup === badge.group) {
-            routeBadgesLayer.addLayer(badge.layer);
+        const isFocused = !activeRouteGroup || activeRouteGroup === badge.group;
+        const isVisible = bounds.contains(badge.latlng);
+
+        if (isFocused && isVisible) {
+            if (!routeBadgesLayer.hasLayer(badge.layer)) routeBadgesLayer.addLayer(badge.layer);
+        } else {
+            if (routeBadgesLayer.hasLayer(badge.layer)) routeBadgesLayer.removeLayer(badge.layer);
         }
     });
 
-    // Zastávky se nahodí až při zoomu 15
+    // 2. ZASTÁVKY
     if (currentZoom >= 15) {
-        allStops.forEach(stop => stopsLayer.addLayer(stop));
+        allStops.forEach(stop => {
+            if (bounds.contains(stop.latlng)) {
+                if (!stopsLayer.hasLayer(stop.layer)) stopsLayer.addLayer(stop.layer);
+            } else {
+                if (stopsLayer.hasLayer(stop.layer)) stopsLayer.removeLayer(stop.layer);
+            }
+        });
+    } else {
+        stopsLayer.clearLayers();
     }
 }
 
-// ZMĚNY OPĚT ŘEŠÍME JEN PŘI ZMĚNĚ ZOOMU
+// Během tahání mapy je Leaflet plynulý. Jakmile zvedneš prst z displeje (moveend), 
+// vymažeme skryté prvky a přidáme nové.
+map.on('moveend', renderVisibleElements);
+
 map.on('zoomend', function() {
-    renderMapElements();
+    renderVisibleElements();
     updateAllBadgeSizes();
 });
