@@ -24,9 +24,25 @@ const routeBadgesLayer = L.layerGroup().addTo(map);
 const stopsLayer = L.layerGroup().addTo(map); 
 
 let allStopsData = []; 
-
-// Globální mezipaměť pixelových pozic štítků pro detekci kolizí na zoomu 13
 let placedRouteBadgesAtZoom13 = [];
+
+// Pomocná funkce pro výpočet GPS bodu v určité procentuální části [0.0 - 1.0] úseku
+function getPointAtFraction(coords, dists, fraction) {
+    let total = dists.reduce((a, b) => a + b, 0);
+    let target = total * fraction;
+    let current = 0;
+    for (let i = 0; i < coords.length - 1; i++) {
+        let d = dists[i];
+        if (current + d >= target) {
+            let ratio = d === 0 ? 0 : (target - current) / d;
+            let lat = coords[i][1] + (coords[i+1][1] - coords[i][1]) * ratio;
+            let lon = coords[i][0] + (coords[i+1][0] - coords[i][0]) * ratio;
+            return [lat, lon];
+        }
+        current += d;
+    }
+    return [coords[coords.length-1][1], coords[coords.length-1][0]];
+}
 
 // DYNAMICKÉ ŠKÁLOVÁNÍ VELIKOSTÍ
 function adjustBadgeSize(element, zoom) {
@@ -56,7 +72,6 @@ function updateAllBadgeSizes() {
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
-        // Reset paměti kolizí před novým načtením
         placedRouteBadgesAtZoom13 = [];
 
         L.geoJSON(data, {
@@ -77,32 +92,15 @@ fetch('trasy.geojson?t=' + new Date().getTime())
 
                     feature.geometry.coordinates.forEach(linePart => {
                         let partLength = 0;
+                        let dists = [];
                         for(let i=0; i<linePart.length-1; i++) {
-                            partLength += map.distance([linePart[i][1], linePart[i][0]], [linePart[i+1][1], linePart[i+1][0]]);
+                            let d = map.distance([linePart[i][1], linePart[i][0]], [linePart[i+1][1], linePart[i+1][0]]);
+                            dists.push(d);
+                            partLength += d;
                         }
                         totalLength += partLength;
-                        
                         if (partLength > 0) {
-                            let targetDist = partLength / 2;
-                            let currentDist = 0;
-                            let exactPoint = null;
-
-                            for(let j=0; j<linePart.length-1; j++) {
-                                let p1 = linePart[j];
-                                let p2 = linePart[j+1];
-                                let d = map.distance([p1[1], p1[0]], [p2[1], p2[0]]);
-                                if (currentDist + d >= targetDist) {
-                                    let ratio = (targetDist - currentDist) / d;
-                                    let lat = p1[1] + (p2[1] - p1[1]) * ratio;
-                                    let lon = p1[0] + (p2[0] - p1[0]) * ratio;
-                                    exactPoint = [lat, lon];
-                                    break;
-                                }
-                                currentDist += d;
-                            }
-                            if (!exactPoint) exactPoint = [linePart[linePart.length-1][1], linePart[linePart.length-1][0]];
-                            
-                            segmentsData.push({ coords: linePart, length: partLength, midpoint: exactPoint });
+                            segmentsData.push({ coords: linePart, dists: dists, length: partLength });
                         }
                     });
 
@@ -120,62 +118,68 @@ fetch('trasy.geojson?t=' + new Date().getTime())
 
                         for (let i = 0; i < segmentsData.length; i++) {
                             if (placedPoints.length >= labelCount) break;
+                            let seg = segmentsData[i];
+                            
+                            // ROZESAZOVÁNÍ (STAGGERING): Pokud střed (0.5) koliduje, zkusíme kraje (0.25 a 0.75)
+                            let candidateFractions = [0.5, 0.25, 0.75];
+                            
+                            for (let fraction of candidateFractions) {
+                                let candidatePoint = getPointAtFraction(seg.coords, seg.dists, fraction);
+                                let isTooClose = false;
 
-                            let candidatePoint = segmentsData[i].midpoint;
-                            let isTooClose = false;
-
-                            // 1. Geografický filtr v rámci STEJNÉ linky (min 6 km rozestup)
-                            for (let pt of placedPoints) {
-                                if (map.distance(candidatePoint, pt) < 6000) { 
-                                    isTooClose = true;
-                                    break;
-                                }
-                            }
-
-                            // 2. NOVÉ: Pixelový filtr vůči VŠEM LINKÁM na základě simulace Zoomu 13
-                            if (!isTooClose) {
-                                const latlngCandidate = L.latLng(candidatePoint[0], candidatePoint[1]);
-                                // Převedeme GPS na pixely obrazovky specificky pro zoom 13
-                                const p13Candidate = map.project(latlngCandidate, 13);
-
-                                for (let pb13 of placedRouteBadgesAtZoom13) {
-                                    // Detekujeme kolizi obdélníků (šířka štítku cca 35px, výška cca 14px)
-                                    if (Math.abs(p13Candidate.x - pb13.x) < 35 && Math.abs(p13Candidate.y - pb13.y) < 14) {
+                                // 1. Geografický filtr (rozestup v rámci stejné linky)
+                                for (let pt of placedPoints) {
+                                    if (map.distance(candidatePoint, pt) < 5000) { 
                                         isTooClose = true;
                                         break;
                                     }
                                 }
-                            }
 
-                            if (!isTooClose) {
-                                placedPoints.push(candidatePoint);
-                                
-                                // Uložíme pixelovou simulaci do globálního pole kolizí
-                                const finalLatLng = L.latLng(candidatePoint[0], candidatePoint[1]);
-                                placedRouteBadgesAtZoom13.push(map.project(finalLatLng, 13));
+                                // 2. Globální pixelový filtr na zoomu 13 (mezi všemi linkami navzájem)
+                                if (!isTooClose) {
+                                    const p13Candidate = map.project(L.latLng(candidatePoint[0], candidatePoint[1]), 13);
+                                    for (let pb13 of placedRouteBadgesAtZoom13) {
+                                        if (Math.abs(p13Candidate.x - pb13.x) < 38 && Math.abs(p13Candidate.y - pb13.y) < 14) {
+                                            isTooClose = true;
+                                            break;
+                                        }
+                                    }
+                                }
 
-                                const badgeTooltip = L.tooltip(candidatePoint, {
-                                    permanent: true,
-                                    direction: 'center',
-                                    className: 'route-map-badge',
-                                    interactive: false
-                                }).setContent(feature.properties.group);
+                                if (!isTooClose) {
+                                    placedPoints.push(candidatePoint);
+                                    placedRouteBadgesAtZoom13.push(map.project(L.latLng(candidatePoint[0], candidatePoint[1]), 13));
 
-                                badgeTooltip.on('add', function(e) {
-                                    const el = e.target.getElement();
-                                    el.style.borderColor = routeColor;
-                                    adjustBadgeSize(el, map.getZoom());
-                                });
+                                    const badgeTooltip = L.tooltip(candidatePoint, {
+                                        permanent: true, direction: 'center', className: 'route-map-badge', interactive: false
+                                    }).setContent(feature.properties.group);
 
-                                routeBadgesLayer.addLayer(badgeTooltip);
+                                    badgeTooltip.on('add', function(e) {
+                                        const el = e.target.getElement();
+                                        el.style.borderColor = routeColor;
+                                        adjustBadgeSize(el, map.getZoom());
+                                    });
+
+                                    routeBadgesLayer.addLayer(badgeTooltip);
+                                    break; // Úspěšně umístěno, ukončíme testování frakcí pro tento úsek
+                                }
                             }
                         }
                         
-                        // Záchranná brzda pro 1 povinný štítek (ignoruje globální kolize, aby linka nezůstala anonymní)
+                        // Záchranná pojistka pro 1 povinný štítek s jemným rozptylem (Jitter)
                         if (placedPoints.length === 0) {
-                            const badgeTooltip = L.tooltip(segmentsData[0].midpoint, {
+                            let seg = segmentsData[0];
+                            let pt = getPointAtFraction(seg.coords, seg.dists, 0.5);
+                            
+                            let hash = parseInt(feature.properties.group) || 0;
+                            let jitterLat = ((hash % 5) - 2) * 0.00015;
+                            let jitterLon = (((hash * 7) % 5) - 2) * 0.00015;
+                            let finalPt = [pt[0] + jitterLat, pt[1] + jitterLon];
+
+                            const badgeTooltip = L.tooltip(finalPt, {
                                 permanent: true, direction: 'center', className: 'route-map-badge', interactive: false
                             }).setContent(feature.properties.group);
+                            
                             badgeTooltip.on('add', function(e) {
                                 e.target.getElement().style.borderColor = routeColor;
                                 adjustBadgeSize(e.target.getElement(), map.getZoom());
@@ -197,7 +201,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
         console.error(error);
     });
 
-// VIEWPORT RENDERING + DETEKCE KOLIZÍ PRO ZASTÁVKY
+// VIEWPORT RENDERING + PROFESIONÁLNÍ DETEKCE PRŮNIKU OBDÉLNÍKŮ (AABB)
 function updateVisibleStops() {
     stopsLayer.clearLayers(); 
     if (map.getZoom() < 15) return;
@@ -205,8 +209,8 @@ function updateVisibleStops() {
     const bounds = map.getBounds();
     const currentZoom = map.getZoom();
     
-    // Lokální pole pro hlídání textových překryvů zastávek na aktuální obrazovce
-    let placedStopsPixels = [];
+    // Pole pro ukládání přesných 2D rozměrů vyrenderovaných textů zastávek
+    let placedStopsBoxes = [];
 
     allStopsData.forEach(feature => {
         const coords = feature.geometry.coordinates;
@@ -217,23 +221,34 @@ function updateVisibleStops() {
             const vZones = rawZone.split(',').map(z => z.trim()).filter(z => z.startsWith('V'));
 
             if (vZones.length > 0) {
-                // Převod aktuální pozice zastávky na pixely obrazovky (zoom 15)
                 const pCurrent = map.project(latlng, currentZoom);
-                let stopOverlaps = false;
+                
+                // DYNAMICKÝ VÝPOČET ROZMĚRU: šířka se odvíjí od reálného počtu písmen názvu + zóny
+                const totalChars = feature.properties.name.length + vZones.join(',').length;
+                const estimatedWidth = totalChars * 6.2 + 45; 
+                const estimatedHeight = 22; 
 
-                for (let ps of placedStopsPixels) {
-                    // Pilulky s názvy měst jsou široké. Bezpečný box: 100px na šířku, 18px na výšku.
-                    if (Math.abs(pCurrent.x - ps.x) < 100 && Math.abs(pCurrent.y - ps.y) < 18) {
-                        stopOverlaps = true;
+                // Matematický box textu, který se vznáší NAD bodem zastávky
+                const candBox = {
+                    minX: pCurrent.x - estimatedWidth / 2,
+                    maxX: pCurrent.x + estimatedWidth / 2,
+                    minY: pCurrent.y - estimatedHeight - 6, 
+                    maxY: pCurrent.y + 2
+                };
+
+                // Detekce kolizí: Test, zda se obdélník kandidáta překrývá s jakýmkoliv už položeným obdélníkem
+                let overlaps = false;
+                for (let box of placedStopsBoxes) {
+                    if (!(candBox.maxX < box.minX || candBox.minX > box.maxX || candBox.maxY < box.minY || candBox.minY > box.maxY)) {
+                        overlaps = true;
                         break;
                     }
                 }
 
-                // Pokud by popisek narazil do jiného, už ho nevykreslíme
-                if (stopOverlaps) return;
+                if (overlaps) return; // Pokud detekujeme překryv textu, zastávku zahodíme
 
-                // Pokud prošel filtrem, zapíšeme si jeho pixely a vyrenderujeme ho
-                placedStopsPixels.push(pCurrent);
+                // Pokud prošla čistě, zapamatujeme si její obdélník pro další porovnávání
+                placedStopsBoxes.push(candBox);
 
                 const htmlContent = `
                     <span class="stop-dot"></span>
