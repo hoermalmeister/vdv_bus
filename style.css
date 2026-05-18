@@ -1,0 +1,84 @@
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background-color: #111;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+#map {
+    width: 100%;
+    height: 100%;
+}
+
+/* Načítací lišta */
+#loading {
+    position: absolute;
+    top: 15px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(20, 20, 20, 0.85);
+    backdrop-filter: blur(8px);
+    color: #fff;
+    padding: 10px 24px;
+    border-radius: 20px;
+    z-index: 9999;
+    font-weight: 600;
+    font-size: 14px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+/* MODERNÍ STYL PRO ZASTÁVKY */
+.modern-stop-label {
+    background: rgba(20, 20, 20, 0.8) !important;
+    backdrop-filter: blur(5px);
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    color: #e0e0e0 !important;
+    font-weight: 600;
+    font-size: 11px;
+    border-radius: 12px;
+    padding: 4px 10px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+.modern-stop-label::before { 
+    display: none !important; 
+}
+/* Malý svítící bod u názvu zastávky signalizující zónu */
+.stop-dot {
+    width: 6px;
+    height: 6px;
+    background-color: #58d68d;
+    border-radius: 50%;
+    box-shadow: 0 0 8px #58d68d;
+    display: inline-block;
+}
+.stop-zone-text {
+    color: #58d68d;
+    font-weight: bold;
+    margin-left: 4px;
+}
+
+/* ŠTÍTKY LINEK PŘÍMO V MAPĚ */
+.route-map-badge {
+    background: #151515 !important;
+    color: #ffffff !important;
+    font-weight: 800;
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.7);
+    text-align: center;
+    white-space: nowrap;
+    /* Border barvu injektujeme dynamicky přes JavaScript */
+    border-style: solid !important;
+    border-width: 2px !important;
+}
+.route-map-badge::before { 
+    display: none !important; 
+}
