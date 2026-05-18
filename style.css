@@ -66,36 +66,6 @@ body, html {
 }
 .route-map-badge::before { display: none !important; }
 
-/* TLAČÍTKO PRO GPS POLOHU */
-#locate-btn {
-    position: absolute;
-    bottom: 30px;
-    right: 20px;
-    z-index: 1000;
-    background: rgba(20, 20, 20, 0.85);
-    backdrop-filter: blur(8px);
-    color: #58d68d;
-    border: 1px solid rgba(255,255,255,0.15);
-    border-radius: 50%;
-    width: 44px;
-    height: 44px;
-    font-size: 24px;
-    cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.2s;
-}
-
-#locate-btn:hover {
-    background: rgba(40, 40, 40, 0.9);
-}
-
-#locate-btn:active {
-    transform: scale(0.95);
-}
-
 /* --- REALTIME VOZIDLA --- */
 .live-vehicle {
     display: flex;
@@ -133,3 +103,43 @@ body, html {
     color: #fff !important;
 }
 .vehicle-tooltip::before { display: none !important; }
+
+/* TLAČÍTKA V PRAVÉM DOLNÍM ROHU */
+#locate-btn, #rt-btn {
+    position: absolute;
+    right: 20px;
+    z-index: 1000;
+    background: rgba(20, 20, 20, 0.85);
+    backdrop-filter: blur(8px);
+    color: #58d68d;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+#locate-btn { 
+    bottom: 30px; 
+    font-size: 24px;
+}
+#rt-btn { 
+    bottom: 84px; 
+    font-size: 20px;
+}
+
+#locate-btn:hover, #rt-btn:hover { background: rgba(40, 40, 40, 0.9); }
+#locate-btn:active, #rt-btn:active { transform: scale(0.95); }
+
+/* Aktivní stav Live mapy */
+#rt-btn.active {
+    background: #58d68d;
+    color: #111;
+    box-shadow: 0 0 15px rgba(88, 214, 141, 0.6);
+    border-color: #58d68d;
+}
