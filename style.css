@@ -43,24 +43,13 @@ body, html {
     align-items: center;
     gap: 6px;
     white-space: nowrap;
+    
+    /* NOVÉ: Přesné centrování nad bodem */
+    transform: translate(-50%, -100%);
+    margin-top: -8px; 
 }
 .modern-stop-label::before { display: none !important; }
 
-.stop-dot {
-    width: 6px;
-    height: 6px;
-    background-color: #58d68d;
-    border-radius: 50%;
-    box-shadow: 0 0 8px #58d68d;
-    display: inline-block;
-}
-.stop-zone-text {
-    color: #58d68d;
-    font-weight: bold;
-    margin-left: 4px;
-}
-
-/* DYNAMICKÝ ŠTÍTEK LINKY - Velikosti jsou nyní řízeny přes JS */
 .route-map-badge {
     background: #151515 !important;
     color: #ffffff !important;
@@ -69,6 +58,10 @@ body, html {
     text-align: center;
     white-space: nowrap;
     border-style: solid !important;
-    transition: all 0.15s ease-out; /* Hladký přechod při změně velikosti zoomu */
+    transition: font-size 0.15s ease-out, padding 0.15s ease-out; 
+    
+    /* NOVÉ: Centrování a povolení klikání na tento ultralehký prvek */
+    transform: translate(-50%, -50%);
+    pointer-events: auto;
 }
 .route-map-badge::before { display: none !important; }
