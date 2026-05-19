@@ -326,65 +326,64 @@ try:
     import re
     import json
 
-    def extrahuj_linku_a_spoj(trip_id):
-        trip_id = str(trip_id)
-        
-        # 1. Hledání linky (Je to vždy to první číslo hned po CISJR:)
-        linka_match = re.search(r'CISJR:(\d+)', trip_id)
-        if not linka_match:
-            return None
-        linka = linka_match.group(1)
-        
-        # 2. Hledání spoje
-        # A) Zkusíme PID formát (např. PID:406_31_250801 -> chceme 31)
-        pid_match = re.search(r'PID:\d+_(\d+)_\d+', trip_id)
-        if pid_match:
-            spoj = pid_match.group(1)
-        else:
-            # B) Standardní CISJR formát (poslední číslo na konci řetězce)
-            # Pomocí findall najdeme všechna čísla za CISJR: a vezmeme to úplně poslední
-            cisjr_matches = re.findall(r'CISJR:(\d+)', trip_id)
-            if cisjr_matches:
-                spoj = cisjr_matches[-1]
-            else:
-                return None
-                
-        return f"{linka}/{spoj}"
+    # Předpočítáme si plná čísla linek (route_short_name)
+    route_full_map = routes.set_index('route_id')['route_short_name'].astype(str).to_dict()
+    trips['full_linka'] = trips['route_id'].map(route_full_map)
 
-    # Aplikujeme naši chytrou funkci na všechny spoje
-    trips['linka_spoj'] = trips['trip_id'].apply(extrahuj_linku_a_spoj)
-    
-    # Odstraníme ty, u kterých se nepovedlo extrahovat ID (např. podivné výlukové formáty)
-    trips_valid = trips.dropna(subset=['linka_spoj'])
-    trip_key_map = trips_valid.set_index('trip_id')['linka_spoj'].to_dict()
-    
+    # Seřadíme stop_times, abychom měli jistotu, že první zastávka je opravdu první
     stop_times_sorted = stop_times.sort_values(['trip_id', 'stop_sequence'])
     
+    # Vytvoříme slovník prvních odjezdů pro každý trip_id
+    first_stops = stop_times_sorted.drop_duplicates('trip_id')
+    first_dep_times = first_stops.set_index('trip_id')['departure_time'].astype(str).to_dict()
+
+    def extrahuj_klic(row):
+        trip_id = str(row['trip_id'])
+        linka = str(row['full_linka'])
+
+        if 'PID:' in trip_id:
+            # Logika pro PID: linka/PIDčas
+            dep_time = first_dep_times.get(trip_id, "")
+            if len(dep_time) >= 5: # Čas je ve formátu "08:35:00" nebo "8:35:00"
+                parts = dep_time.split(':')
+                hh = parts[0].zfill(2) # Přidá nulu na začátek, pokud chybí (8 -> 08)
+                mm = parts[1]
+                return f"{linka}/PID{hh}{mm}"
+            return None
+        else:
+            # Logika pro VDV: linka/spoj
+            cisjr_matches = re.findall(r'CISJR:(\d+)', trip_id)
+            if cisjr_matches:
+                spoj = cisjr_matches[-1] # Vždy vezmeme to úplně poslední číslo
+                return f"{linka}/{spoj}"
+            return None
+
+    trips['linka_spoj'] = trips.apply(extrahuj_klic, axis=1)
+    trips_valid = trips.dropna(subset=['linka_spoj'])
+    trip_key_map = trips_valid.set_index('trip_id')['linka_spoj'].to_dict()
+
     trip_shapes = {}
     for trip_id, group in stop_times_sorted.groupby('trip_id'):
-        if trip_id not in trip_key_map: 
+        if trip_id not in trip_key_map:
             continue
         linka_spoj = trip_key_map[trip_id]
-        
+
         coords = []
         for _, row in group.iterrows():
-            # ID zastávky v GTFS občas mívá příponu nástupiště (např. U734Z1.2), tu odřízneme
             base_stop = str(row['stop_id']).split('.')[0]
             if base_stop in stops_clean.index:
                 lat = stops_clean.loc[base_stop, 'stop_lat']
                 lon = stops_clean.loc[base_stop, 'stop_lon']
                 coords.append([lat, lon])
-                
-        # Uložíme jen trasy, které mají alespoň 2 body
+
         if len(coords) > 1:
             trip_shapes[linka_spoj] = coords
 
-    # Uložení finálního slovníku
     with open("spoje.json", "w", encoding="utf-8") as f:
         json.dump(trip_shapes, f, separators=(',', ':'))
         
     print(f"Soubor spoje.json úspěšně vytvořen! (Uloženo {len(trip_shapes)} tras spojů)")
-    
+
 except Exception as e:
     print("Chyba při generování spoje.json:", e)
     import traceback
