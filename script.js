@@ -15,11 +15,14 @@ if (urlParams.has('line')) initialRoute = urlParams.get('line');
 if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
 if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
 
-// --- 2. INICIALIZACE MAPY ---
-const map = L.map('map', { preferCanvas: true, minZoom: 10, maxZoom: 15 }).setView([startLat, startLng], startZoom); 
+// --- 2. INICIALIZACE MAPY S DYNAMICKÝM ZOOMEM ---
+// Zjistíme, jestli hned po startu potřebujeme povolit hluboký zoom
+const initialMaxZoom = isRealtimeMode ? 19 : 15;
+
+const map = L.map('map', { preferCanvas: true, minZoom: 10, maxZoom: initialMaxZoom }).setView([startLat, startLng], startZoom); 
 
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { 
-    attribution: '© OpenStreetMap © CARTO', minZoom: 10, maxZoom: 15 
+    attribution: '© OpenStreetMap © CARTO', minZoom: 10, maxZoom: 19, maxNativeZoom: 19
 }).addTo(map);
 
 const linesLayer = L.layerGroup().addTo(map);
@@ -94,17 +97,26 @@ function updateAllBadgeSizes() {
     document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, map.getZoom()));
 }
 
-// --- 5. PŘEPÍNAČ ŽIVÉ MAPY ---
+// --- 5. PŘEPÍNAČ ŽIVÉ MAPY S OCHRANOU ZOOMU ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
     
     if (isRealtimeMode) {
+        // Povolíme detailní přiblížení až na úroveň ulice
+        map.setMaxZoom(19);
+        
         if(btn) btn.classList.add('active');
         if(!selectedVehicleId) highlightRoute(null);
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
+        // Omezíme zoom zpět na 15. Pokud je uživatel blíž, odzoomujeme ho!
+        map.setMaxZoom(15);
+        if (map.getZoom() > 15) {
+            map.setZoom(15);
+        }
+        
         if(btn) btn.classList.remove('active');
         clearInterval(rtInterval);
         liveVehiclesLayer.clearLayers();
@@ -178,6 +190,8 @@ function renderVisibleElements() {
             if (!routeBadgesLayer.hasLayer(badge.layer)) routeBadgesLayer.addLayer(badge.layer);
         } else routeBadgesLayer.removeLayer(badge.layer);
     });
+    
+    // Zastávky ukaž jen od zoomu 15 a výše
     if (map.getZoom() >= 15) {
         allStops.forEach(stop => {
             if (bounds.contains(stop.latlng)) { if (!stopsLayer.hasLayer(stop.layer)) stopsLayer.addLayer(stop.layer); } 
@@ -192,15 +206,14 @@ map.on('zoomend', function() { renderVisibleElements(); updateAllBadgeSizes(); u
 // --- 8. GPS LOKALIZACE ---
 let userMarker = null;
 const locateBtn = document.getElementById('locate-btn');
-if(locateBtn) locateBtn.addEventListener('click', () => map.locate({ setView: true, maxZoom: 14 }));
+if(locateBtn) locateBtn.addEventListener('click', () => map.locate({ setView: true, maxZoom: 16 }));
 map.on('locationfound', function(e) {
     if (!userMarker) userMarker = L.circleMarker(e.latlng, { radius: 7, color: '#fff', weight: 2, fillColor: '#3388ff', fillOpacity: 1 }).addTo(map);
     else userMarker.setLatLng(e.latlng);
 });
 
 
-// --- 9. MODÁLNÍ OKNA, JÍZDNÍ ŘÁDY A VÝPOČET ZPOŽDĚNÍ ---
-
+// --- 9. MODÁLNÍ OKNA A JÍZDNÍ ŘÁDY ---
 window.openTimetable = async function(vehicleId, delayInMinutes) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
@@ -209,14 +222,11 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
         
-        // Vytvoříme si v paměti DOM, abychom mohli snadno upravovat časy v tabulce
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
         
-        // Pokud známe zpoždění (a není to nesmyslná hodnota), přidáme ho do hlavičky a upravíme časy
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             
-            // 1. Zobrazení textu v hlavičce
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
                 let delayClass = delayInMinutes >= 10 ? 'delay-alert-text' : (delayInMinutes > 0 ? 'delay-warn-text' : 'delay-ok-text');
@@ -228,7 +238,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
                 headerRight.appendChild(delaySpan);
             }
             
-            // 2. Matematický přepočet všech časů v tabulce (Přeškrtnutí starého a vypsání nového)
             if (delayInMinutes !== 0) {
                 const timeCells = tempDiv.querySelectorAll('td.has-text-centered');
                 timeCells.forEach(cell => {
@@ -238,7 +247,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
                         let m = parseInt(timeMatch[2], 10);
                         
                         let totalMin = h * 60 + m + delayInMinutes;
-                        if (totalMin < 0) totalMin += 24 * 60; // Překročení půlnoci dozadu
+                        if (totalMin < 0) totalMin += 24 * 60; 
                         
                         let newH = Math.floor(totalMin / 60) % 24;
                         let newM = totalMin % 60;
@@ -267,13 +276,12 @@ async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
 
-    const shortLine = v.text.replace(/\D/g, '').slice(-3); 
-    highlightRoute(shortLine);
+    const isTrain = v.traction === 'TRAIN';
+    const routeToHighlight = isTrain ? v.text : v.text.replace(/\D/g, '').slice(-3); 
+    highlightRoute(routeToHighlight);
 
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`);
-        
-        // OPRAVA: Pošleme funkci openTimetable i zpoždění vozidla (v.delay)
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((\d+),\s*\d+\)/g, `openTimetable($1, ${v.delay})`);
 
         const isMobile = window.innerWidth <= 768;
@@ -330,14 +338,22 @@ async function fetchLiveVehicles() {
             else if (v.delay > 0 && v.delay <= 9) delayClass = 'delay-warn';
             else if (v.delay >= 10) delayClass = 'delay-alert';
 
-            const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
-            const iconHtml = `<div class="live-vehicle ${shapeClass} ${delayClass}">${shortLine}</div>`;
+            let innerContent;
+            if (isTrain) {
+                innerContent = `
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="#111" style="margin-top: 2px;">
+                    <path d="M12 2C8 2 4 2.5 4 6v9.5C4 17.4 5.6 19 7.5 19L6 20.5v.5h2.2l1.5-1.5h4.6l1.5 1.5h2.2v-.5L16.5 19c1.9 0 3.5-1.6 3.5-3.5V6c0-3.5-4-4-8-4zm0 2c3.5 0 5.5.5 5.5 2s-2 2-5.5 2-5.5-.5-5.5-2 2-2 5.5-2zm-3.5 11c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm7 0c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM12 11c-3.9 0-6-1.5-6-1.5V7.5S8.1 9 12 9s6-1.5 6-1.5v2s-2.1 1.5-6 1.5z"/>
+                </svg>`;
+            } else {
+                innerContent = v.text.replace(/\D/g, '').slice(-3) || "??";
+            }
+
+            const iconHtml = `<div class="live-vehicle ${shapeClass} ${delayClass}">${innerContent}</div>`;
 
             if (liveVehicleMarkers[v.id]) {
                 liveVehicleMarkers[v.id].setLatLng([v.lat, v.lng]);
                 liveVehicleMarkers[v.id].setIcon(L.divIcon({ className: '', html: iconHtml, iconSize: [28, 28], iconAnchor: [14, 14] }));
                 
-                // Aktualizujeme data o zpoždění pro případný klik
                 liveVehicleMarkers[v.id].off('click');
                 liveVehicleMarkers[v.id].on('click', () => handleVehicleClick(v));
             } else {
