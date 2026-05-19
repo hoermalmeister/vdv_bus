@@ -33,6 +33,7 @@ let allBadges = [];
 let allStops = [];
 let liveVehicleMarkers = {}; 
 let activeRouteGroup = null;
+let tripShapes = {}; // ZDE SE ULOŽÍ NÁŠ NOVÝ SLOVNÍK Z PYTHONU!
 
 async function fetchKrajskeHtml(url) {
     const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
@@ -41,72 +42,7 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// --- 3. CHIRURGICKÁ NORMALIZACE NÁZVŮ (Bez Substring Trapu) ---
-function normalizeStopName(name) {
-    let s = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    
-    // Veškerou myslitelnou interpunkci přepíšeme na mezery
-    s = s.replace(/[,.\-\/]/g, ' ');
-    s = s.replace(/\s+/g, ' ').trim();
-    
-    // Výjimky, které by se klasicky špatně překládaly (aby "n.Mor" nebylo "nad morave")
-    s = s.replace(/\bn mor\b/g, 'na morave');
-    s = s.replace(/\bn morave\b/g, 'na morave');
-    s = s.replace(/\baut nadr\b/g, 'autobusovenadrazi');
-    s = s.replace(/\baut nadrazi\b/g, 'autobusovenadrazi');
-    s = s.replace(/\bzel st\b/g, 'zeleznicnistanice');
-    s = s.replace(/\bz st\b/g, 'zeleznicnistanice');
-    
-    // Standardní slovník pro řeky a typy zastávek
-    const dict = {
-        'nam': 'namesti', 'rozc': 'rozcesti', 'zast': 'zastavka', 'sidl': 'sidliste',
-        'nem': 'nemocnice', 'nemoc': 'nemocnice', 'vyzk': 'vyzkumny', 'ust': 'ustav',
-        'n': 'nad', 'p': 'pod', 'm': 'mesto', 'saz': 'sazavou', 'osl': 'oslavou',
-        'doubr': 'doubravou', 'bystr': 'bystrici', 'mor': 'morave', 'l': 'labem', 'vlt': 'vltavou',
-        'odb': 'odbocka', 'st': 'stanice', 'zel': 'zeleznicni', 'aut': 'autobusove', 'nadr': 'nadrazi',
-        'stred': 'stredisko', 'zs': 'zakladniskola', 'u': 'u'
-    };
-    
-    let words = s.split(' ').map(w => dict[w] || w);
-    return words.join(' ');
-}
-
-function getDistanceToLines(latlng, multiLineCoords) {
-    if (!multiLineCoords || multiLineCoords.length === 0) return Infinity;
-    let minDist = Infinity;
-    for (let line of multiLineCoords) {
-        for (let pt of line) {
-            let d = latlng.distanceTo(L.latLng(pt[1], pt[0]));
-            if (d < minDist) minDist = d;
-        }
-    }
-    return minDist;
-}
-
-function findBestStop(normName, multiLineCoords, previousLatLng) {
-    // 1. ZÁKLADNÍ KONTROLA: Přesná shoda po normalizaci
-    let candidates = allStops.filter(s => s.normalized === normName);
-    
-    // ZRUŠENO záchranné kolo s "includes()" a "startsWith()". 
-    // Pokud se název přesně nespáruje, raději vrátíme NULL a přeskočíme ho, než odskočit do Hradce.
-    if (candidates.length === 0) return null; 
-    
-    if (candidates.length === 1) return candidates[0].latlng;
-
-    // 2. Duplicitní jména obcí (např. 2x Nová Ves) - hledáme nejbližší bod k silnici linky
-    let bestCandidate = null;
-    let minScore = Infinity;
-
-    for (let c of candidates) {
-        let score = Infinity;
-        if (multiLineCoords && multiLineCoords.length > 0) score = getDistanceToLines(c.latlng, multiLineCoords);
-        else if (previousLatLng) score = c.latlng.distanceTo(previousLatLng);
-
-        if (score < minScore) { minScore = score; bestCandidate = c.latlng; }
-    }
-    return bestCandidate || candidates[0].latlng;
-}
-
+// Algoritmus pro spojení přesných bodů po našich zakřivených silnicích
 function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
     let bestPath = null;
     let minError = Infinity;
@@ -137,7 +73,7 @@ function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
     return bestPath; 
 }
 
-// --- 4. AKTUALIZACE URL A UI ---
+// --- 3. AKTUALIZACE URL A UI ---
 function updateURL() {
     const center = map.getCenter();
     const params = new URLSearchParams();
@@ -188,7 +124,7 @@ function adjustBadgeSize(element, zoom) {
 
 function updateAllBadgeSizes() { document.querySelectorAll('.route-map-badge').forEach(badge => adjustBadgeSize(badge, map.getZoom())); }
 
-// --- 5. PŘEPÍNAČ ŽIVÉ MAPY ---
+// --- 4. PŘEPÍNAČ ŽIVÉ MAPY ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
@@ -218,7 +154,14 @@ function toggleRealtimeMode(forceState = null) {
 
 if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
 
-// --- 6. NAČÍTÁNÍ GEOJSON DAT ---
+// --- 5. NAČÍTÁNÍ PŘEDPOČÍTANÝCH DAT Z PYTHONU ---
+// 1. Nejprve stáhneme ty přesné souřadnice spojů
+fetch('spoje.json?t=' + new Date().getTime())
+    .then(r => r.json())
+    .then(data => { tripShapes = data; })
+    .catch(e => console.error("Chyba při načítání spoje.json:", e));
+
+// 2. Následně stáhneme GeoJSON
 fetch('trasy.geojson?t=' + new Date().getTime())
     .then(response => response.json())
     .then(data => {
@@ -243,7 +186,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
                     const latlng = L.latLng(feature.geometry.coordinates[1], feature.geometry.coordinates[0]);
                     const marker = L.circleMarker(latlng, { radius: 4, color: '#fff', weight: 1.5, fillColor: '#58d68d', fillOpacity: 1 })
                         .bindTooltip(`<span class="stop-dot"></span><span>${props.name}</span><span class="stop-zone-text">${props.zones_formatted}</span>`, { permanent: true, direction: 'top', className: 'modern-stop-label', offset: [0, -6] });
-                    allStops.push({ layer: marker, latlng: latlng, name: props.name, normalized: normalizeStopName(props.name) });
+                    allStops.push({ layer: marker, latlng: latlng });
                 }
             }
         });
@@ -255,7 +198,7 @@ fetch('trasy.geojson?t=' + new Date().getTime())
     })
     .catch(error => console.error("GeoJSON Error:", error));
 
-// --- 7. RENDEROVACÍ LOOP ---
+// --- 6. RENDEROVACÍ LOOP ---
 function renderVisibleElements() {
     const bounds = map.getBounds().pad(0.1);
     allBadges.forEach(badge => {
@@ -275,7 +218,7 @@ function renderVisibleElements() {
 map.on('moveend', function() { renderVisibleElements(); updateURL(); });
 map.on('zoomend', function() { renderVisibleElements(); updateAllBadgeSizes(); updateURL(); });
 
-// --- 8. GPS LOKALIZACE ---
+// --- 7. GPS LOKALIZACE ---
 let userMarker = null;
 const locateBtn = document.getElementById('locate-btn');
 if(locateBtn) locateBtn.addEventListener('click', () => map.locate({ setView: true, maxZoom: 16 }));
@@ -285,7 +228,7 @@ map.on('locationfound', function(e) {
 });
 
 
-// --- 9. MODÁLNÍ OKNA A DETAIL SPOJE ---
+// --- 8. MODÁLNÍ OKNA A DETAIL SPOJE ---
 window.openTimetable = async function(vehicleId, delayInMinutes) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
@@ -358,6 +301,7 @@ async function handleVehicleClick(v) {
 
         tripRouteLayer.clearLayers();
         
+        // ZÍSKÁNÍ TRASY Z GTFS A VYKRESLENÍ (Mnohem chytřejší metoda)
         if (!isTrain) {
             let multiLineCoords = [];
             linesLayer.eachLayer(layer => {
@@ -366,22 +310,27 @@ async function handleVehicleClick(v) {
                 }
             });
 
+            // 1. Najdeme id "Linka/Spoj" ukryté v HTML
             const parser = new DOMParser();
             const doc = parser.parseFromString(timetableRaw, 'text/html');
-            const stopCells = doc.querySelectorAll('tbody tr td:first-child');
+            const labelSpan = doc.getElementById('currentLineRouteLabel');
             
             let stopCoords = [];
-            let previousLatLng = null;
-
-            stopCells.forEach(cell => {
-                const normName = normalizeStopName(cell.innerText);
-                const bestLatLng = findBestStop(normName, multiLineCoords, previousLatLng);
-                if (bestLatLng) {
-                    stopCoords.push(bestLatLng);
-                    previousLatLng = bestLatLng;
+            if (labelSpan) {
+                // Odstraní všechny mezery, vytvoří formát např. "842117/31"
+                const linkaSpoj = labelSpan.innerText.replace(/\s+/g, ''); 
+                
+                // Vytáhne hotové souřadnice z našeho nového Python souboru
+                const rawCoords = tripShapes[linkaSpoj]; 
+                
+                if (rawCoords) {
+                    stopCoords = rawCoords.map(c => L.latLng(c[0], c[1]));
+                } else {
+                    console.warn("Trajektorie pro spoj " + linkaSpoj + " nebyla nalezena v GTFS. Modrá čára se nevykreslí.");
                 }
-            });
+            }
 
+            // 2. Vykreslíme trasu přilepenou na zatáčky GeoJSONu
             if (stopCoords.length > 1) {
                 let finalTripCoords = [stopCoords[0]];
                 for (let i = 0; i < stopCoords.length - 1; i++) {
@@ -389,7 +338,7 @@ async function handleVehicleClick(v) {
                     let B = stopCoords[i+1];
                     let roadPath = getPathBetweenStops(A, B, multiLineCoords);
                     if (roadPath) finalTripCoords.push(...roadPath);
-                    else finalTripCoords.push(B); 
+                    else finalTripCoords.push(B); // Bezpečný fallback (přímka), pokud GeoJSON cesty chybí
                 }
 
                 const polyline = L.polyline(finalTripCoords, { 
@@ -422,7 +371,7 @@ async function handleVehicleClick(v) {
     }
 }
 
-// --- 10. ENGINE PRO ŽIVÁ VOZIDLA ---
+// --- 9. ENGINE PRO ŽIVÁ VOZIDLA ---
 async function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     try {
