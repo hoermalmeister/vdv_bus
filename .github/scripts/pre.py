@@ -323,40 +323,72 @@ geojson_obj = { "type": "FeatureCollection", "features": optimized_features }
 
 print("Fáze 5: Generování přesných tras spojů (GTFS Match)...")
 try:
-    # Z routes.txt potřebujeme plné číslo linky (např. 842117)
-    route_full_map = routes.set_index('route_id')['route_short_name'].astype(str).to_dict()
+    import re
+    import json
+
+    def extrahuj_linku_a_spoj(trip_id):
+        trip_id = str(trip_id)
+        
+        # 1. Hledání linky (Je to vždy to první číslo hned po CISJR:)
+        linka_match = re.search(r'CISJR:(\d+)', trip_id)
+        if not linka_match:
+            return None
+        linka = linka_match.group(1)
+        
+        # 2. Hledání spoje
+        # A) Zkusíme PID formát (např. PID:406_31_250801 -> chceme 31)
+        pid_match = re.search(r'PID:\d+_(\d+)_\d+', trip_id)
+        if pid_match:
+            spoj = pid_match.group(1)
+        else:
+            # B) Standardní CISJR formát (poslední číslo na konci řetězce)
+            # Pomocí findall najdeme všechna čísla za CISJR: a vezmeme to úplně poslední
+            cisjr_matches = re.findall(r'CISJR:(\d+)', trip_id)
+            if cisjr_matches:
+                spoj = cisjr_matches[-1]
+            else:
+                return None
+                
+        return f"{linka}/{spoj}"
+
+    # Aplikujeme naši chytrou funkci na všechny spoje
+    trips['linka_spoj'] = trips['trip_id'].apply(extrahuj_linku_a_spoj)
     
-    trips['full_linka'] = trips['route_id'].map(route_full_map)
-    trips['trip_short_name'] = trips['trip_short_name'].astype(str)
-    
-    # Vytvoříme klíč ve formátu "Linka/Spoj", který přesně odpovídá API (např. "842117/31")
-    trips['linka_spoj'] = trips['full_linka'] + '/' + trips['trip_short_name']
-    trip_key_map = trips.set_index('trip_id')['linka_spoj'].to_dict()
+    # Odstraníme ty, u kterých se nepovedlo extrahovat ID (např. podivné výlukové formáty)
+    trips_valid = trips.dropna(subset=['linka_spoj'])
+    trip_key_map = trips_valid.set_index('trip_id')['linka_spoj'].to_dict()
     
     stop_times_sorted = stop_times.sort_values(['trip_id', 'stop_sequence'])
     
     trip_shapes = {}
     for trip_id, group in stop_times_sorted.groupby('trip_id'):
-        if trip_id not in trip_key_map: continue
+        if trip_id not in trip_key_map: 
+            continue
         linka_spoj = trip_key_map[trip_id]
         
         coords = []
         for _, row in group.iterrows():
+            # ID zastávky v GTFS občas mívá příponu nástupiště (např. U734Z1.2), tu odřízneme
             base_stop = str(row['stop_id']).split('.')[0]
             if base_stop in stops_clean.index:
                 lat = stops_clean.loc[base_stop, 'stop_lat']
                 lon = stops_clean.loc[base_stop, 'stop_lon']
-                coords.append([lat, lon]) # Ukládáme přesné GPS souřadnice zastávek
+                coords.append([lat, lon])
                 
+        # Uložíme jen trasy, které mají alespoň 2 body
         if len(coords) > 1:
             trip_shapes[linka_spoj] = coords
 
-    # Uložíme jako bleskurychlý slovník pro náš JavaScript
+    # Uložení finálního slovníku
     with open("spoje.json", "w", encoding="utf-8") as f:
         json.dump(trip_shapes, f, separators=(',', ':'))
-    print("Soubor spoje.json úspěšně vytvořen!")
+        
+    print(f"Soubor spoje.json úspěšně vytvořen! (Uloženo {len(trip_shapes)} tras spojů)")
+    
 except Exception as e:
     print("Chyba při generování spoje.json:", e)
+    import traceback
+    traceback.print_exc()
 
 print("Ukládám plně optimalizovaný trasy.geojson...")
 with open("trasy.geojson", "w", encoding="utf-8") as f:
