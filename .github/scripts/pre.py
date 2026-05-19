@@ -321,6 +321,43 @@ for feature in raw_features:
 
 geojson_obj = { "type": "FeatureCollection", "features": optimized_features }
 
+print("Fáze 5: Generování přesných tras spojů (GTFS Match)...")
+try:
+    # Z routes.txt potřebujeme plné číslo linky (např. 842117)
+    route_full_map = routes.set_index('route_id')['route_short_name'].astype(str).to_dict()
+    
+    trips['full_linka'] = trips['route_id'].map(route_full_map)
+    trips['trip_short_name'] = trips['trip_short_name'].astype(str)
+    
+    # Vytvoříme klíč ve formátu "Linka/Spoj", který přesně odpovídá API (např. "842117/31")
+    trips['linka_spoj'] = trips['full_linka'] + '/' + trips['trip_short_name']
+    trip_key_map = trips.set_index('trip_id')['linka_spoj'].to_dict()
+    
+    stop_times_sorted = stop_times.sort_values(['trip_id', 'stop_sequence'])
+    
+    trip_shapes = {}
+    for trip_id, group in stop_times_sorted.groupby('trip_id'):
+        if trip_id not in trip_key_map: continue
+        linka_spoj = trip_key_map[trip_id]
+        
+        coords = []
+        for _, row in group.iterrows():
+            base_stop = str(row['stop_id']).split('.')[0]
+            if base_stop in stops_clean.index:
+                lat = stops_clean.loc[base_stop, 'stop_lat']
+                lon = stops_clean.loc[base_stop, 'stop_lon']
+                coords.append([lat, lon]) # Ukládáme přesné GPS souřadnice zastávek
+                
+        if len(coords) > 1:
+            trip_shapes[linka_spoj] = coords
+
+    # Uložíme jako bleskurychlý slovník pro náš JavaScript
+    with open("spoje.json", "w", encoding="utf-8") as f:
+        json.dump(trip_shapes, f, separators=(',', ':'))
+    print("Soubor spoje.json úspěšně vytvořen!")
+except Exception as e:
+    print("Chyba při generování spoje.json:", e)
+
 print("Ukládám plně optimalizovaný trasy.geojson...")
 with open("trasy.geojson", "w", encoding="utf-8") as f:
     json.dump(geojson_obj, f, ensure_ascii=False, allow_nan=False)
