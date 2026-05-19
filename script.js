@@ -41,29 +41,33 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// --- 3. EXTRÉMNĚ CHYTRÁ NORMALIZACE NÁZVŮ (Oprava Substring Trapu) ---
+// --- 3. CHIRURGICKÁ NORMALIZACE NÁZVŮ (Bez Substring Trapu) ---
 function normalizeStopName(name) {
     let s = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     
-    // Všechnu interpunkci převedeme na mezeru (jindrichuv hradec, aut. nadr. -> jindrichuv hradec aut nadr)
-    s = s.replace(/[,.-]/g, ' ');
+    // Veškerou myslitelnou interpunkci přepíšeme na mezery
+    s = s.replace(/[,.\-\/]/g, ' ');
     s = s.replace(/\s+/g, ' ').trim();
     
-    // Časté zkratky
+    // Výjimky, které by se klasicky špatně překládaly (aby "n.Mor" nebylo "nad morave")
+    s = s.replace(/\bn mor\b/g, 'na morave');
+    s = s.replace(/\bn morave\b/g, 'na morave');
     s = s.replace(/\baut nadr\b/g, 'autobusovenadrazi');
     s = s.replace(/\baut nadrazi\b/g, 'autobusovenadrazi');
     s = s.replace(/\bzel st\b/g, 'zeleznicnistanice');
+    s = s.replace(/\bz st\b/g, 'zeleznicnistanice');
     
+    // Standardní slovník pro řeky a typy zastávek
     const dict = {
         'nam': 'namesti', 'rozc': 'rozcesti', 'zast': 'zastavka', 'sidl': 'sidliste',
         'nem': 'nemocnice', 'nemoc': 'nemocnice', 'vyzk': 'vyzkumny', 'ust': 'ustav',
         'n': 'nad', 'p': 'pod', 'm': 'mesto', 'saz': 'sazavou', 'osl': 'oslavou',
-        'doubr': 'doubravou', 'bystr': 'bystrici', 'mor': 'morave', 'l': 'labem', 'vlt': 'vltavou'
+        'doubr': 'doubravou', 'bystr': 'bystrici', 'mor': 'morave', 'l': 'labem', 'vlt': 'vltavou',
+        'odb': 'odbocka', 'st': 'stanice', 'zel': 'zeleznicni', 'aut': 'autobusove', 'nadr': 'nadrazi',
+        'stred': 'stredisko', 'zs': 'zakladniskola', 'u': 'u'
     };
     
     let words = s.split(' ').map(w => dict[w] || w);
-    
-    // SPOJÍME ZPĚT MEZEROU (Důležité pro rozeznání celých slov)
     return words.join(' ');
 }
 
@@ -80,22 +84,16 @@ function getDistanceToLines(latlng, multiLineCoords) {
 }
 
 function findBestStop(normName, multiLineCoords, previousLatLng) {
+    // 1. ZÁKLADNÍ KONTROLA: Přesná shoda po normalizaci
     let candidates = allStops.filter(s => s.normalized === normName);
     
-    if (candidates.length === 0) {
-        // Záchranné kolo č.1: Kontrola ZAČÁTKU textu včetně mezery. 
-        // Zabrání matchnutí "cernov " do "cernovice ", ale povolí "cernov " do "cernov rozcesti "
-        candidates = allStops.filter(s => {
-            let a = s.normalized + " ";
-            let b = normName + " ";
-            return (a.startsWith(b) || b.startsWith(a)) && s.normalized.length > 4 && normName.length > 4;
-        });
-    }
-
-    if (candidates.length === 0) return null;
+    // ZRUŠENO záchranné kolo s "includes()" a "startsWith()". 
+    // Pokud se název přesně nespáruje, raději vrátíme NULL a přeskočíme ho, než odskočit do Hradce.
+    if (candidates.length === 0) return null; 
+    
     if (candidates.length === 1) return candidates[0].latlng;
 
-    // Záchranné kolo č.2: Duplicitní jména obcí, hledáme nejbližší
+    // 2. Duplicitní jména obcí (např. 2x Nová Ves) - hledáme nejbližší bod k silnici linky
     let bestCandidate = null;
     let minScore = Infinity;
 
