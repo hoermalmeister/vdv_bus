@@ -41,11 +41,15 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// --- 3. NORMALIZACE NÁZVŮ A TRASOVÁNÍ ---
+// --- 3. EXTRÉMNĚ CHYTRÁ NORMALIZACE NÁZVŮ (Oprava Substring Trapu) ---
 function normalizeStopName(name) {
     let s = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    
+    // Všechnu interpunkci převedeme na mezeru (jindrichuv hradec, aut. nadr. -> jindrichuv hradec aut nadr)
     s = s.replace(/[,.-]/g, ' ');
     s = s.replace(/\s+/g, ' ').trim();
+    
+    // Časté zkratky
     s = s.replace(/\baut nadr\b/g, 'autobusovenadrazi');
     s = s.replace(/\baut nadrazi\b/g, 'autobusovenadrazi');
     s = s.replace(/\bzel st\b/g, 'zeleznicnistanice');
@@ -56,8 +60,11 @@ function normalizeStopName(name) {
         'n': 'nad', 'p': 'pod', 'm': 'mesto', 'saz': 'sazavou', 'osl': 'oslavou',
         'doubr': 'doubravou', 'bystr': 'bystrici', 'mor': 'morave', 'l': 'labem', 'vlt': 'vltavou'
     };
+    
     let words = s.split(' ').map(w => dict[w] || w);
-    return words.join('');
+    
+    // SPOJÍME ZPĚT MEZEROU (Důležité pro rozeznání celých slov)
+    return words.join(' ');
 }
 
 function getDistanceToLines(latlng, multiLineCoords) {
@@ -74,14 +81,24 @@ function getDistanceToLines(latlng, multiLineCoords) {
 
 function findBestStop(normName, multiLineCoords, previousLatLng) {
     let candidates = allStops.filter(s => s.normalized === normName);
+    
     if (candidates.length === 0) {
-        candidates = allStops.filter(s => (s.normalized.includes(normName) || normName.includes(s.normalized)) && s.normalized.length > 5 && normName.length > 5);
+        // Záchranné kolo č.1: Kontrola ZAČÁTKU textu včetně mezery. 
+        // Zabrání matchnutí "cernov " do "cernovice ", ale povolí "cernov " do "cernov rozcesti "
+        candidates = allStops.filter(s => {
+            let a = s.normalized + " ";
+            let b = normName + " ";
+            return (a.startsWith(b) || b.startsWith(a)) && s.normalized.length > 4 && normName.length > 4;
+        });
     }
+
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0].latlng;
 
+    // Záchranné kolo č.2: Duplicitní jména obcí, hledáme nejbližší
     let bestCandidate = null;
     let minScore = Infinity;
+
     for (let c of candidates) {
         let score = Infinity;
         if (multiLineCoords && multiLineCoords.length > 0) score = getDistanceToLines(c.latlng, multiLineCoords);
@@ -282,7 +299,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
 
-        // ODSTRANĚNÍ NECHTĚNÉ SPODNÍ NAVIGACE (Tlačítka a Legenda)
         const legend = tempDiv.querySelector('#timetableColorsLegend');
         if (legend) {
             const bottomRow = legend.closest('.columns');
@@ -344,7 +360,6 @@ async function handleVehicleClick(v) {
 
         tripRouteLayer.clearLayers();
         
-        // VYKRESLOVÁNÍ TRASY POUZE POKUD TO NENÍ VLAK
         if (!isTrain) {
             let multiLineCoords = [];
             linesLayer.eachLayer(layer => {
@@ -440,7 +455,6 @@ async function fetchLiveVehicles() {
             else if (v.delay > 0 && v.delay <= 9) delayClass = 'delay-warn';
             else if (v.delay >= 10) delayClass = 'delay-alert';
 
-            // Pokud to není vlak a linka má 1 nebo 2 znaky, nahodíme tmavě modrou třídu!
             if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
                 delayClass = 'delay-dim-blue';
             }
