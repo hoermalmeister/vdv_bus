@@ -301,7 +301,7 @@ async function handleVehicleClick(v) {
 
         tripRouteLayer.clearLayers();
         
-        // ZÍSKÁNÍ TRASY Z GTFS A VYKRESLENÍ (Mnohem chytřejší metoda)
+       // --- ZÍSKÁNÍ TRASY Z GTFS A VYKRESLENÍ ---
         if (!isTrain) {
             let multiLineCoords = [];
             linesLayer.eachLayer(layer => {
@@ -310,27 +310,42 @@ async function handleVehicleClick(v) {
                 }
             });
 
-            // 1. Najdeme id "Linka/Spoj" ukryté v HTML
+            // 1. Zjistíme, co o spoji říká HTML hlavička
             const parser = new DOMParser();
             const doc = parser.parseFromString(timetableRaw, 'text/html');
             const labelSpan = doc.getElementById('currentLineRouteLabel');
             
-            let stopCoords = [];
+            let linka = "", spoj = "";
             if (labelSpan) {
-                // Odstraní všechny mezery, vytvoří formát např. "842117/31"
-                const linkaSpoj = labelSpan.innerText.replace(/\s+/g, ''); 
-                
-                // Vytáhne hotové souřadnice z našeho nového Python souboru
-                const rawCoords = tripShapes[linkaSpoj]; 
-                
-                if (rawCoords) {
-                    stopCoords = rawCoords.map(c => L.latLng(c[0], c[1]));
-                } else {
-                    console.warn("Trajektorie pro spoj " + linkaSpoj + " nebyla nalezena v GTFS. Modrá čára se nevykreslí.");
+                const parts = labelSpan.innerText.split('/');
+                if(parts.length >= 1) linka = parts[0].trim();
+                if(parts.length >= 2) spoj = parts[1].trim();
+            }
+
+            // 2. Extrahujeme čas první zastávky pro PID fallback (sloupec 3 = Odjezd)
+            let firstTime = "";
+            const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
+            if (firstTimeCell) {
+                const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/);
+                if (timeMatch) {
+                    firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; // Vytvoří tvar např. "0835"
                 }
             }
 
-            // 2. Vykreslíme trasu přilepenou na zatáčky GeoJSONu
+            // 3. Zkusíme zjistit, na jaký klíč náš Python slovník zareaguje!
+            const vdvKey = `${linka}/${spoj}`;
+            const pidKey = `${linka}/PID${firstTime}`;
+
+            let stopCoords = [];
+            const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
+            
+            if (rawCoords) {
+                stopCoords = rawCoords.map(c => L.latLng(c[0], c[1]));
+            } else {
+                console.warn(`Trajektorie pro spoj (VDV: ${vdvKey} / PID: ${pidKey}) nebyla nalezena v GTFS. Modrá čára se nevykreslí.`);
+            }
+
+            // 4. Vykreslíme trasu přilepenou na zatáčky GeoJSONu
             if (stopCoords.length > 1) {
                 let finalTripCoords = [stopCoords[0]];
                 for (let i = 0; i < stopCoords.length - 1; i++) {
@@ -338,7 +353,7 @@ async function handleVehicleClick(v) {
                     let B = stopCoords[i+1];
                     let roadPath = getPathBetweenStops(A, B, multiLineCoords);
                     if (roadPath) finalTripCoords.push(...roadPath);
-                    else finalTripCoords.push(B); // Bezpečný fallback (přímka), pokud GeoJSON cesty chybí
+                    else finalTripCoords.push(B); // Bezpečný fallback na přímku, pokud GeoJSON úsek chybí
                 }
 
                 const polyline = L.polyline(finalTripCoords, { 
@@ -350,6 +365,7 @@ async function handleVehicleClick(v) {
                 });
                 tripRouteLayer.addLayer(polyline);
             }
+        }
         }
 
         let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
