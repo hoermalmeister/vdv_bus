@@ -88,6 +88,8 @@ body, html {
 .delay-warn { background-color: #f39c12; }
 .delay-alert { background-color: #e74c3c; }
 .delay-unknown { background-color: #7f8c8d; }
+.delay-dim-blue { background-color: #1a2530 !important; border-color: #2c3e50 !important; color: #5dade2 !important; }
+.delay-dim-blue-text { color: #5dade2 !important; }
 
 /* Barvy zpoždění (Text v tooltipu) */
 .delay-ok-text { color: #58d68d; }
