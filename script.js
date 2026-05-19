@@ -15,7 +15,7 @@ if (urlParams.has('line')) initialRoute = urlParams.get('line');
 if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
 if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
 
-// --- 2. INICIALIZACE MAPY S DYNAMICKÝM ZOOMEM ---
+// --- 2. INICIALIZACE MAPY ---
 const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = L.map('map', { preferCanvas: true, minZoom: 10, maxZoom: initialMaxZoom }).setView([startLat, startLng], startZoom); 
 
@@ -34,11 +34,6 @@ let allStops = [];
 let liveVehicleMarkers = {}; 
 let activeRouteGroup = null;
 
-// --- POMOCNÉ FUNKCE PRO ZPRACOVÁNÍ DAT ---
-function normalizeStopName(name) {
-    return name.toLowerCase().replace(/[\s,\.-]/g, '');
-}
-
 async function fetchKrajskeHtml(url) {
     const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
@@ -46,7 +41,47 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// Změří vzdálenost bodu k libovolné nejbližší části silnice
+// --- 3. EXTRÉMNĚ CHYTRÁ NORMALIZACE NÁZVŮ (Řeší zkratky a řeky) ---
+function normalizeStopName(name) {
+    // 1. Odstranění diakritiky (háčky, čárky) a převod na malá písmena
+    let s = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    
+    // 2. Nahrazení interpunkce mezerami (rozsekne to tvé n.Osl. -> n osl)
+    s = s.replace(/[,.-]/g, ' ');
+    s = s.replace(/\s+/g, ' ').trim();
+    
+    // 3. Rozbalení víceslovných frází
+    s = s.replace(/\baut nadr\b/g, 'autobusovenadrazi');
+    s = s.replace(/\baut nadrazi\b/g, 'autobusovenadrazi');
+    s = s.replace(/\bzel st\b/g, 'zeleznicnistanice');
+    
+    // 4. Slovník samostatných zkratek
+    const dict = {
+        'nam': 'namesti',
+        'rozc': 'rozcesti',
+        'zast': 'zastavka',
+        'sidl': 'sidliste',
+        'nem': 'nemocnice',
+        'nemoc': 'nemocnice',
+        'vyzk': 'vyzkumny',
+        'ust': 'ustav',
+        'n': 'nad',
+        'p': 'pod',
+        'm': 'mesto',
+        'saz': 'sazavou',
+        'osl': 'oslavou',
+        'doubr': 'doubravou',
+        'bystr': 'bystrici',
+        'mor': 'morave',
+        'l': 'labem',
+        'vlt': 'vltavou'
+    };
+
+    // Složení zpět do jednoho "slepence" bez mezer
+    let words = s.split(' ').map(w => dict[w] || w);
+    return words.join('');
+}
+
 function getDistanceToLines(latlng, multiLineCoords) {
     if (!multiLineCoords || multiLineCoords.length === 0) return Infinity;
     let minDist = Infinity;
@@ -59,13 +94,23 @@ function getDistanceToLines(latlng, multiLineCoords) {
     return minDist;
 }
 
-// Najde nejlepší zastávku (filtruje duplicity pomocí vzdálenosti k lince)
+// Chytřejší vyhledávání zastávky (S podporou částečné shody)
 function findBestStop(normName, multiLineCoords, previousLatLng) {
+    // 1. Přesná shoda po normalizaci (např. zdarnadsazavouautobusovenadrazi)
     let candidates = allStops.filter(s => s.normalized === normName);
+    
+    // 2. Záchranné kolo (Fallback): Jeden zdroj má méně slov než druhý
+    if (candidates.length === 0) {
+        candidates = allStops.filter(s => 
+            (s.normalized.includes(normName) || normName.includes(s.normalized)) && 
+            s.normalized.length > 5 && normName.length > 5
+        );
+    }
+
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0].latlng;
 
-    // Máme duplicitní názvy obcí, musíme rozhodnout podle geometrie
+    // 3. Záchranné kolo 2: Stejnojmenné obce, rozhodne blízskost k trase
     let bestCandidate = null;
     let minScore = Infinity;
 
@@ -85,7 +130,6 @@ function findBestStop(normName, multiLineCoords, previousLatLng) {
     return bestCandidate || candidates[0].latlng;
 }
 
-// Algoritmus pro nalezení trasy po silnici z GeoJSONu (nebo rovné čáry)
 function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
     let bestPath = null;
     let minError = Infinity;
@@ -120,7 +164,7 @@ function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
     return bestPath; 
 }
 
-// --- 3. AKTUALIZACE URL ---
+// --- 4. AKTUALIZACE URL A UI ---
 function updateURL() {
     const center = map.getCenter();
     const params = new URLSearchParams();
@@ -136,7 +180,6 @@ function updateURL() {
     window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
-// --- 4. ZVÝRAZNĚNÍ TRASY (PRO BĚŽNÝ REŽIM) ---
 function highlightRoute(group) {
     activeRouteGroup = group;
     linesLayer.eachLayer(layer => {
@@ -342,7 +385,6 @@ window.closeTimetable = function() {
 async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
-
     highlightRoute(null);
 
     const isTrain = v.traction === 'TRAIN';
@@ -354,7 +396,6 @@ async function handleVehicleClick(v) {
             fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${v.id}&currentStopId=0`)
         ]);
 
-        // --- ZÍSKÁVÁNÍ SILNIC Z GEOJSONU (před hledáním zastávek) ---
         let multiLineCoords = [];
         linesLayer.eachLayer(layer => {
             if (layer.feature.properties.group === routeToHighlight) {
@@ -362,7 +403,6 @@ async function handleVehicleClick(v) {
             }
         });
 
-        // --- REKONSTRUKCE TRASY (S ROZLIŠENÍM DUPLICITNÍCH JMEN) ---
         const parser = new DOMParser();
         const doc = parser.parseFromString(timetableRaw, 'text/html');
         const stopCells = doc.querySelectorAll('tbody tr td:first-child');
@@ -372,7 +412,7 @@ async function handleVehicleClick(v) {
 
         stopCells.forEach(cell => {
             const normName = normalizeStopName(cell.innerText);
-            // Najdeme nejlepší zastávku s ohledem na naši linku a předchozí zastávku
+            // ZDE JE TO KOUZLO S NOVOU CHYTROU FUNKCÍ
             const bestLatLng = findBestStop(normName, multiLineCoords, previousLatLng);
             
             if (bestLatLng) {
@@ -388,11 +428,8 @@ async function handleVehicleClick(v) {
                 let A = stopCoords[i];
                 let B = stopCoords[i+1];
                 let roadPath = getPathBetweenStops(A, B, multiLineCoords);
-                if (roadPath) {
-                    finalTripCoords.push(...roadPath);
-                } else {
-                    finalTripCoords.push(B); 
-                }
+                if (roadPath) finalTripCoords.push(...roadPath);
+                else finalTripCoords.push(B); 
             }
 
             const polyline = L.polyline(finalTripCoords, { 
@@ -405,7 +442,6 @@ async function handleVehicleClick(v) {
             tripRouteLayer.addLayer(polyline);
         }
 
-        // --- ZOBRAZENÍ HTML BUBLINY ---
         let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
 
         if (window.innerWidth <= 768) {
