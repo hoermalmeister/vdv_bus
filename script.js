@@ -282,7 +282,9 @@ async function handleVehicleClick(v) {
 
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`);
-        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((\d+),\s*\d+\)/g, `openTimetable($1, ${v.delay})`);
+        
+        // OPRAVA ZDE: Přidáno (-?\d+) místo (\d+), aby Regex rozpoznal i záporná ID vlaků!
+        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
 
         const isMobile = window.innerWidth <= 768;
 
