@@ -25,7 +25,7 @@ const map = new maplibregl.Map({
     container: 'map',
     style: {
         version: 8,
-        glyphs: "https://demotiles.maplibre.org/fonts/{fontstack}/{range}.pbf",
+        glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
         sources: {
             'carto-dark': {
                 type: 'raster',
