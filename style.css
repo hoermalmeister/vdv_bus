@@ -1,10 +1,14 @@
-body, html {
+/* =========================================================
+   1. ZÁKLADNÍ NASTAVENÍ A MAPA
+========================================================= */
+html, body {
     margin: 0;
     padding: 0;
     width: 100%;
     height: 100%;
     background-color: #111;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'Open Sans', Arial, sans-serif;
+    overflow: hidden; /* Zabrání tahání stránky na mobilech */
 }
 
 #map {
@@ -12,102 +16,28 @@ body, html {
     height: 100%;
 }
 
+.hidden { 
+    display: none !important; 
+}
+
 #loading {
     position: absolute;
-    top: 15px;
+    top: 50%;
     left: 50%;
-    transform: translateX(-50%);
-    background: rgba(20, 20, 20, 0.85);
-    backdrop-filter: blur(8px);
-    color: #fff;
-    padding: 10px 24px;
-    border-radius: 20px;
-    z-index: 9999;
-    font-weight: 600;
-    font-size: 14px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-    border: 1px solid rgba(255,255,255,0.1);
-}
-
-.modern-stop-label {
-    background: rgba(20, 20, 20, 0.8) !important;
-    backdrop-filter: blur(5px);
-    border: 1px solid rgba(255, 255, 255, 0.15) !important;
-    color: #e0e0e0 !important;
-    font-weight: 600;
-    font-size: 11px;
-    border-radius: 12px;
-    padding: 4px 10px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-    
-    /* NOVÉ: Přesné centrování nad bodem */
-    transform: translate(-50%, -100%);
-    margin-top: -8px; 
-}
-.modern-stop-label::before { display: none !important; }
-
-.route-map-badge {
-    background: #151515 !important;
-    color: #ffffff !important;
-    font-weight: 800;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.7);
-    text-align: center;
-    white-space: nowrap;
-    border-style: solid !important;
-    transition: font-size 0.15s ease-out, padding 0.15s ease-out; 
-    
-    /* NOVÉ: Centrování a povolení klikání na tento ultralehký prvek */
     transform: translate(-50%, -50%);
-    pointer-events: auto;
-}
-.route-map-badge::before { display: none !important; }
-
-/* --- REALTIME VOZIDLA --- */
-.live-vehicle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    font-size: 11px;
-    font-weight: 900;
-    color: #111;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.9);
-    border: 2px solid #fff;
-    transition: all 0.3s ease-out;
-}
-.live-vehicle.bus { border-radius: 50%; }
-.live-vehicle.train { border-radius: 6px; }
-
-/* Barvy zpoždění (Pozadí ikonek) */
-.delay-ok { background-color: #58d68d; }
-.delay-warn { background-color: #f39c12; }
-.delay-alert { background-color: #e74c3c; }
-.delay-unknown { background-color: #7f8c8d; }
-.delay-dim-blue { background-color: #1a2530 !important; border-color: #2c3e50 !important; color: #5dade2 !important; }
-.delay-dim-blue-text { color: #5dade2 !important; }
-
-/* Barvy zpoždění (Text v tooltipu) */
-.delay-ok-text { color: #58d68d; }
-.delay-warn-text { color: #f39c12; }
-.delay-alert-text { color: #e74c3c; }
-.delay-unknown-text { color: #7f8c8d; }
-
-.vehicle-tooltip {
-    background: rgba(20, 20, 20, 0.95) !important;
-    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    background: rgba(20, 20, 20, 0.9);
+    color: #fff;
+    padding: 15px 30px;
     border-radius: 8px;
-    padding: 8px 12px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.6);
-    color: #fff !important;
+    z-index: 9999;
+    border: 1px solid rgba(255,255,255,0.2);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    font-weight: bold;
 }
-.vehicle-tooltip::before { display: none !important; }
 
-/* TLAČÍTKA V PRAVÉM DOLNÍM ROHU */
+/* =========================================================
+   2. OVLÁDACÍ TLAČÍTKA (Pravý dolní roh)
+========================================================= */
 #locate-btn, #rt-btn {
     position: absolute;
     right: 20px;
@@ -129,17 +59,23 @@ body, html {
 
 #locate-btn { 
     bottom: 30px; 
-    font-size: 24px;
+    font-size: 24px; 
 }
+
 #rt-btn { 
     bottom: 84px; 
-    font-size: 20px;
+    font-size: 20px; 
 }
 
-#locate-btn:hover, #rt-btn:hover { background: rgba(40, 40, 40, 0.9); }
-#locate-btn:active, #rt-btn:active { transform: scale(0.95); }
+#locate-btn:hover, #rt-btn:hover { 
+    background: rgba(40, 40, 40, 0.9); 
+}
 
-/* Aktivní stav Live mapy */
+#locate-btn:active, #rt-btn:active { 
+    transform: scale(0.95); 
+}
+
+/* Aktivní svítící stav pro Live mapu */
 #rt-btn.active {
     background: #58d68d;
     color: #111;
@@ -147,10 +83,38 @@ body, html {
     border-color: #58d68d;
 }
 
-/* --- UI PRO JÍZDNÍ ŘÁDY A DETAILY --- */
-.hidden { display: none !important; }
+/* =========================================================
+   3. VYSKAKOVACÍ BUBLINY (MapLibre Dark Mode)
+========================================================= */
+.maplibregl-popup-content {
+    background: rgba(20, 20, 20, 0.95) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.8);
+    border-radius: 8px;
+    padding: 15px;
+}
 
-/* Mobilní spodní lišta */
+.maplibregl-popup-tip { 
+    border-top-color: rgba(20, 20, 20, 0.95) !important; 
+}
+
+.maplibregl-popup-close-button { 
+    color: #aaa; 
+    font-size: 18px; 
+    right: 5px; 
+    top: 5px; 
+}
+
+.maplibregl-popup-close-button:hover { 
+    color: #fff; 
+    background: transparent; 
+}
+
+
+/* =========================================================
+   4. MOBILNÍ LIŠTA (Zobrazení spoje zespodu)
+========================================================= */
 #mobile-bottom-bar {
     position: absolute;
     bottom: 0;
@@ -168,7 +132,10 @@ body, html {
     cursor: pointer;
 }
 
-/* Modální okno jízdního řádu */
+
+/* =========================================================
+   5. MODÁLNÍ OKNO JÍZDNÍHO ŘÁDU & KRAJSKÉ TABULKY
+========================================================= */
 #timetable-modal {
     position: fixed;
     top: 0; left: 0; width: 100%; height: 100%;
@@ -181,6 +148,7 @@ body, html {
     padding: 20px;
     box-sizing: border-box;
 }
+
 #timetable-modal-content {
     background: #1e1e1e;
     width: 100%;
@@ -194,37 +162,51 @@ body, html {
     border: 1px solid rgba(255,255,255,0.1);
 }
 
-/* Záchrana krajského HTML (tabulky a tlačítka) */
-.table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 13px; color: #fff;}
-.table th, .table td { padding: 8px; border-bottom: 1px solid #333; text-align: left; }
-.table th { color: #888; width: 40%; }
-.table.is-striped tbody tr:nth-child(even) { background-color: rgba(255,255,255,0.02); }
-.button { 
-    background: #58d68d; color: #111; border: none; padding: 8px 16px; 
-    border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%;
+/* Níže je Bulma CSS záchrana - styluje surové HTML z krajského API */
+.table { 
+    width: 100%; 
+    border-collapse: collapse; 
+    margin-bottom: 15px; 
+    font-size: 13px; 
+    color: #fff;
 }
-.button:hover { background: #45b373; }
-.level { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+.table th, .table td { 
+    padding: 8px; 
+    border-bottom: 1px solid #333; 
+    text-align: left; 
+}
+.table th { 
+    color: #aaa; 
+    font-weight: normal; 
+    width: 40%; 
+}
+.table td { 
+    color: #fff; 
+    font-weight: bold; 
+}
+.table.is-striped tbody tr:nth-child(even) { 
+    background-color: rgba(255,255,255,0.02); 
+}
+
+.button { 
+    background: #58d68d; 
+    color: #111; 
+    border: none; 
+    padding: 8px 16px; 
+    border-radius: 6px; 
+    font-weight: bold; 
+    cursor: pointer; 
+    width: 100%;
+}
+.button:hover { 
+    background: #45b373; 
+}
+
+.level { 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    margin-bottom: 15px; 
+}
 .is-hidden { display: none !important; }
 .has-text-centered { text-align: center !important; }
-
-.leaflet-popup-content-wrapper, .leaflet-popup-tip {
-    background: rgba(20, 20, 20, 0.95) !important;
-    color: #fff !important;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.8);
-}
-.leaflet-popup-content {
-    margin: 14px;
-}
-.leaflet-popup-close-button {
-    color: #aaa !important;
-}
-.leaflet-popup-close-button:hover {
-    color: #fff !important;
-}
-
-/* Ladění barev uvnitř tabulek (v bublině i na mobilu) */
-.table th { color: #aaa !important; font-weight: normal; }
-.table td { color: #fff !important; font-weight: bold; }
-.legendDot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
