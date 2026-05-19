@@ -26,7 +26,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 const linesLayer = L.layerGroup().addTo(map);
 const routeBadgesLayer = L.layerGroup().addTo(map); 
 const stopsLayer = L.layerGroup().addTo(map); 
-const tripRouteLayer = L.layerGroup().addTo(map); // Vrstva pro přesnou trasu konkrétního spoje
+const tripRouteLayer = L.layerGroup().addTo(map); 
 const liveVehiclesLayer = L.layerGroup().addTo(map);
 
 let allBadges = [];
@@ -46,6 +46,45 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
+// Změří vzdálenost bodu k libovolné nejbližší části silnice
+function getDistanceToLines(latlng, multiLineCoords) {
+    if (!multiLineCoords || multiLineCoords.length === 0) return Infinity;
+    let minDist = Infinity;
+    for (let line of multiLineCoords) {
+        for (let pt of line) {
+            let d = latlng.distanceTo(L.latLng(pt[1], pt[0]));
+            if (d < minDist) minDist = d;
+        }
+    }
+    return minDist;
+}
+
+// Najde nejlepší zastávku (filtruje duplicity pomocí vzdálenosti k lince)
+function findBestStop(normName, multiLineCoords, previousLatLng) {
+    let candidates = allStops.filter(s => s.normalized === normName);
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0].latlng;
+
+    // Máme duplicitní názvy obcí, musíme rozhodnout podle geometrie
+    let bestCandidate = null;
+    let minScore = Infinity;
+
+    for (let c of candidates) {
+        let score = Infinity;
+        if (multiLineCoords && multiLineCoords.length > 0) {
+            score = getDistanceToLines(c.latlng, multiLineCoords);
+        } else if (previousLatLng) {
+            score = c.latlng.distanceTo(previousLatLng);
+        }
+
+        if (score < minScore) {
+            minScore = score;
+            bestCandidate = c.latlng;
+        }
+    }
+    return bestCandidate || candidates[0].latlng;
+}
+
 // Algoritmus pro nalezení trasy po silnici z GeoJSONu (nebo rovné čáry)
 function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
     let bestPath = null;
@@ -55,7 +94,6 @@ function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
         let idxA = -1, idxB = -1;
         let MathMinA = Infinity, MathMinB = Infinity;
 
-        // Najdeme body na křivce, které jsou nejblíže zastávkám A a B
         for (let i = 0; i < line.length; i++) {
             let pt = L.latLng(line[i][1], line[i][0]);
             let dA = pt.distanceTo(latlngA);
@@ -65,13 +103,11 @@ function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
             if (dB < MathMinB) { MathMinB = dB; idxB = i; }
         }
 
-        // Pokud je křivka poblíž obou zastávek (tolerance 500m kvůli vizuálnímu odsazení linek)
         if (MathMinA < 500 && MathMinB < 500 && idxA !== -1 && idxB !== -1) {
             let error = MathMinA + MathMinB;
             if (error < minError) {
                 minError = error;
                 let path = [];
-                // Vyřízneme přesnou křivku z pole
                 if (idxA <= idxB) {
                     for (let k = idxA; k <= idxB; k++) path.push(L.latLng(line[k][1], line[k][0]));
                 } else {
@@ -81,7 +117,7 @@ function getPathBetweenStops(latlngA, latlngB, multiLineCoords) {
             }
         }
     }
-    return bestPath; // Vrátí křivku, nebo null (pokud křivka v datech neexistuje)
+    return bestPath; 
 }
 
 // --- 3. AKTUALIZACE URL ---
@@ -307,7 +343,6 @@ async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
 
-    // Všechny linky natvrdo ztlumíme, aby vynikla pouze naše budoucí zářivá čára
     highlightRoute(null);
 
     const isTrain = v.traction === 'TRAIN';
@@ -319,48 +354,49 @@ async function handleVehicleClick(v) {
             fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${v.id}&currentStopId=0`)
         ]);
 
-        // --- MAGIE: REKONSTRUKCE PŘESNÉ TRASY SPOJE ---
+        // --- ZÍSKÁVÁNÍ SILNIC Z GEOJSONU (před hledáním zastávek) ---
+        let multiLineCoords = [];
+        linesLayer.eachLayer(layer => {
+            if (layer.feature.properties.group === routeToHighlight) {
+                multiLineCoords = layer.feature.geometry.coordinates;
+            }
+        });
+
+        // --- REKONSTRUKCE TRASY (S ROZLIŠENÍM DUPLICITNÍCH JMEN) ---
         const parser = new DOMParser();
         const doc = parser.parseFromString(timetableRaw, 'text/html');
         const stopCells = doc.querySelectorAll('tbody tr td:first-child');
         
         let stopCoords = [];
+        let previousLatLng = null;
+
         stopCells.forEach(cell => {
             const normName = normalizeStopName(cell.innerText);
-            const foundStop = allStops.find(s => s.normalized === normName);
-            if (foundStop) stopCoords.push(foundStop.latlng);
+            // Najdeme nejlepší zastávku s ohledem na naši linku a předchozí zastávku
+            const bestLatLng = findBestStop(normName, multiLineCoords, previousLatLng);
+            
+            if (bestLatLng) {
+                stopCoords.push(bestLatLng);
+                previousLatLng = bestLatLng;
+            }
         });
 
         tripRouteLayer.clearLayers();
         if (stopCoords.length > 1) {
-            
-            // 1. Získáme všechny křivky, které patří k této lince z GeoJSONu
-            let multiLineCoords = [];
-            linesLayer.eachLayer(layer => {
-                if (layer.feature.properties.group === routeToHighlight) {
-                    multiLineCoords = layer.feature.geometry.coordinates;
-                }
-            });
-
-            // 2. Postupně sestavíme trasu propojováním zastávek
             let finalTripCoords = [stopCoords[0]];
-            
             for (let i = 0; i < stopCoords.length - 1; i++) {
                 let A = stopCoords[i];
                 let B = stopCoords[i+1];
-                
                 let roadPath = getPathBetweenStops(A, B, multiLineCoords);
-                
                 if (roadPath) {
-                    finalTripCoords.push(...roadPath); // Zkopírujeme zatáčky ze silnice
+                    finalTripCoords.push(...roadPath);
                 } else {
-                    finalTripCoords.push(B); // Fallback na přímou čáru vzduchem
+                    finalTripCoords.push(B); 
                 }
             }
 
-            // 3. Vykreslíme výslednou trasu svítivě modrou čarou
             const polyline = L.polyline(finalTripCoords, { 
-                color: '#00e5ff',     // Zářivá neonově modrá (Solidní)
+                color: '#00e5ff',     
                 weight: 5, 
                 opacity: 1,
                 lineCap: 'round', 
