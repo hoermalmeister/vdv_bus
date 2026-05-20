@@ -47,6 +47,20 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
+// Bezpečná oprava chybějících mezer za čárkami (pro správné zalamování)
+function fixCommasInHtml(htmlString) {
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = htmlString;
+    const walker = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
+    let node;
+    while ((node = walker.nextNode())) {
+        if (node.nodeValue.trim() !== '') {
+            node.nodeValue = node.nodeValue.replace(/,(?=[^\s])/g, ', ');
+        }
+    }
+    return tempDiv.innerHTML;
+}
+
 function getDistance(pt1, pt2) {
     const dx = pt1[0] - pt2[0], dy = pt1[1] - pt2[1];
     return Math.sqrt(dx*dx + dy*dy) * 111000;
@@ -164,7 +178,6 @@ function getBadgeIcon(group, color) {
     canvas.height = height * PIXEL_RATIO;
     ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
     
-    // Tady definujeme quasi-obdélníček
     ctx.fillStyle = 'rgba(20, 20, 20, 0.95)';
     ctx.beginPath();
     const r = 6;
@@ -184,7 +197,6 @@ function getBadgeIcon(group, color) {
     ctx.strokeStyle = color; 
     ctx.stroke();
 
-    // Vpečení textu rovnou do grafiky
     ctx.font = 'bold 13px "Open Sans", Arial, sans-serif';
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
@@ -242,7 +254,6 @@ map.on('load', async () => {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
         geojsonData = await res.json();
         
-        // Předgenerování štítků linek
         geojsonData.features.forEach(f => {
             if (f.geometry.type === 'Point' && f.properties.type === 'stop') {
                 allStops.push({
@@ -258,12 +269,12 @@ map.on('load', async () => {
 
         map.addSource('trasy', { type: 'geojson', data: geojsonData });
 
-        // Tlusté čáry linek (Zde byl opraven filtr pro WebGL)
+        // OPRAVENÝ FILTR PRO LINKY (Podporuje LineString i MultiLineString)
         map.addLayer({
             id: 'lines-layer',
             type: 'line',
             source: 'trasy',
-            filter: ['==', ['geometry-type'], 'LineString'], 
+            filter: ['any', ['==', ['geometry-type'], 'LineString'], ['==', ['geometry-type'], 'MultiLineString']], 
             paint: {
                 'line-color': ['get', 'color'],
                 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6],
@@ -271,7 +282,6 @@ map.on('load', async () => {
             }
         });
 
-        // TADY JSOU ŠTÍTKY (Kolize ZAPNUTA - skryjí se vcelku, když se nevejdou)
         map.addLayer({
             id: 'badges-layer',
             type: 'symbol',
@@ -316,7 +326,7 @@ map.on('load', async () => {
             paint: { 'line-color': '#00e5ff', 'line-width': 5, 'line-opacity': 1 }
         });
 
-        // TADY JSOU VOZIDLA (Kolize VYPNUTA - překrývají se jako DOM elementy!)
+        // VOZIDLA (Kolize VYPNUTA - překrývají se čistě jako obrázky, žádní duchové)
         map.addSource('vehicles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         map.addLayer({
             id: 'vehicles-layer',
@@ -389,7 +399,9 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
-        cleanHtml = cleanHtml.replace(/>([^<]+)</g, (m, text) => '>' + text.replace(/,(?=[^\s])/g, ', ') + '<');
+        
+        // ZAVOLÁNÍ OPRAVY ČÁREK PŘED ZOBRAZENÍM
+        cleanHtml = fixCommasInHtml(cleanHtml);
         
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
@@ -511,6 +523,9 @@ async function handleVehicleClick(v) {
         }
 
         let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
+        
+        // ZAVOLÁNÍ OPRAVY ČÁREK I PRO VYSKAKOVACÍ BUBLINU/LIŠTU
+        cleanHtml = fixCommasInHtml(cleanHtml);
 
         if (window.innerWidth <= 768) {
             const bar = document.getElementById('mobile-bottom-bar');
@@ -524,7 +539,7 @@ async function handleVehicleClick(v) {
     } catch(e) { console.error("Nelze načíst detail vozidla", e); }
 }
 
-// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (ČISTÉ WEBGL S CANVASEM) ---
+// --- 6. ENGINE PRO ŽIVÁ VOZIDLA ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
@@ -577,7 +592,6 @@ async function fetchLiveVehicles() {
                     delayClass = 'dim'; 
                 }
 
-                // Geniální: Za běhu vygenerujeme a vrátíme správnou ikonu z Canvasu!
                 const iconId = getVehicleIcon(delayClass, shortLine, isTrain);
 
                 return {
