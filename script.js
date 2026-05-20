@@ -389,6 +389,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
+        cleanHtml = cleanHtml.replace(/>([^<]+)</g, (m, text) => '>' + text.replace(/,(?=[^\s])/g, ', ') + '<');
         
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
