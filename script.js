@@ -47,7 +47,6 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// Bezpečná oprava chybějících mezer za čárkami (pro správné zalamování)
 function fixCommasInHtml(htmlString) {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = htmlString;
@@ -158,9 +157,8 @@ function updateURL() {
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
 
-
-// --- 2. VYKRESLOVÁNÍ GRAFIKY ROVNOU DO PAMĚTI KARTY (High-DPI Canvas Baking) ---
-const PIXEL_RATIO = 2; // Extrémně ostrý text i na mobilech!
+// --- 2. VYKRESLOVÁNÍ GRAFIKY (High-DPI Canvas Baking) ---
+const PIXEL_RATIO = 2; 
 
 function getBadgeIcon(group, color) {
     const id = `badge-${group}-${color}`;
@@ -269,7 +267,6 @@ map.on('load', async () => {
 
         map.addSource('trasy', { type: 'geojson', data: geojsonData });
 
-        // OPRAVENÝ FILTR PRO LINKY (Podporuje LineString i MultiLineString)
         map.addLayer({
             id: 'lines-layer',
             type: 'line',
@@ -326,7 +323,6 @@ map.on('load', async () => {
             paint: { 'line-color': '#00e5ff', 'line-width': 5, 'line-opacity': 1 }
         });
 
-        // VOZIDLA (Kolize VYPNUTA - překrývají se čistě jako obrázky, žádní duchové)
         map.addSource('vehicles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         map.addLayer({
             id: 'vehicles-layer',
@@ -399,12 +395,17 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
-        
-        // ZAVOLÁNÍ OPRAVY ČÁREK PŘED ZOBRAZENÍM
         cleanHtml = fixCommasInHtml(cleanHtml);
         
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
+
+        // ODSTRANĚNÍ NEPOTŘEBNÉ BEZBARIÉROVOSTI Z TABULKY JÍZDNÍHO ŘÁDU
+        tempDiv.querySelectorAll('tr').forEach(tr => {
+            if (tr.textContent.toLowerCase().includes('bezbariér')) {
+                tr.remove();
+            }
+        });
 
         const legend = tempDiv.querySelector('#timetableColorsLegend');
         if (legend) {
@@ -524,8 +525,18 @@ async function handleVehicleClick(v) {
 
         let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
         
-        // ZAVOLÁNÍ OPRAVY ČÁREK I PRO VYSKAKOVACÍ BUBLINU/LIŠTU
+        // ZAVOLÁNÍ OPRAVY ČÁREK PŘED ZOBRAZENÍM VYSKAKOVACÍ BUBLINY/LIŠTY
         cleanHtml = fixCommasInHtml(cleanHtml);
+
+        // ODSTRANĚNÍ NEPOTŘEBNÉ BEZBARIÉROVOSTI Z DETAILU VOZIDLA
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = cleanHtml;
+        tempDiv.querySelectorAll('tr').forEach(tr => {
+            if (tr.textContent.toLowerCase().includes('bezbariér')) {
+                tr.remove();
+            }
+        });
+        cleanHtml = tempDiv.innerHTML;
 
         if (window.innerWidth <= 768) {
             const bar = document.getElementById('mobile-bottom-bar');
@@ -609,11 +620,36 @@ async function fetchLiveVehicles() {
     } catch (e) { console.error("Chyba RT dat:", e); }
 }
 
+// --- 7. TLAČÍTKA LOKALIZACE A SEVERKY ---
 const locateBtn = document.getElementById('locate-btn');
 if(locateBtn) locateBtn.addEventListener('click', () => {
     if ("geolocation" in navigator) {
         navigator.geolocation.getCurrentPosition(position => {
             map.flyTo({ center: [position.coords.longitude, position.coords.latitude], zoom: 14 });
         });
+    }
+});
+
+// Automatické generování tlačítka Severky
+const compassBtn = document.createElement('div');
+compassBtn.id = 'compass-btn';
+compassBtn.className = 'hidden';
+// SVG šipka kompasu ukazující nahoru
+compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
+document.body.appendChild(compassBtn);
+
+compassBtn.addEventListener('click', () => {
+    map.resetNorth({ duration: 500 });
+});
+
+// Skrývání a zobrazování severky při rotaci mapy
+map.on('rotate', () => {
+    const bearing = map.getBearing();
+    if (bearing === 0) {
+        compassBtn.classList.add('hidden');
+    } else {
+        compassBtn.classList.remove('hidden');
+        // Natočení ikony šipky tak, aby neustále ukazovala k reálnému severu
+        compassBtn.querySelector('svg').style.transform = `rotate(${-bearing}deg)`;
     }
 });
