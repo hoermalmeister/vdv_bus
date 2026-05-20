@@ -20,6 +20,7 @@ if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
 let geojsonData = null;
 let allStops = [];
 let tripShapes = {}; 
+let trainStopsMap = {}; // Databáze železničních stanic
 let activeRouteGroup = null;
 
 // --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
@@ -275,12 +276,55 @@ function getVehicleIcon(delayClass, label, isTrain) {
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
+    
+    // Načítání spojů autobusů
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
     } catch (e) {
-        console.warn("spoje.json nenalezen, linky spojů nepůjdou vykreslit", e);
+        console.warn("spoje.json nenalezen", e);
     }
+
+    // NOVÉ: Inteligentní načítání a parsování železničních stanic
+    try {
+        const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
+        if (zRes.ok) {
+            const zText = await zRes.text();
+            try {
+                // Zkusíme, zda je soubor formátován jako JSON
+                const zData = JSON.parse(zText);
+                if (Array.isArray(zData)) {
+                    zData.forEach(item => {
+                        const n = item.name || item.stop_name || item.Name || item.stanice;
+                        const lat = item.lat || item.stop_lat || item.Lat;
+                        const lon = item.lon || item.lng || item.stop_lon || item.Lon;
+                        if (n && lat && lon) trainStopsMap[n] = [parseFloat(lon), parseFloat(lat)];
+                    });
+                } else {
+                    for (let key in zData) {
+                        let c = zData[key];
+                        // Otočení souřadnic [lat, lon] -> [lng, lat], pokud je to potřeba (v ČR je lon ~15, lat ~49)
+                        if (c[0] > 40) trainStopsMap[key] = [c[1], c[0]]; 
+                        else trainStopsMap[key] = [c[0], c[1]];
+                    }
+                }
+            } catch(e) {
+                // Pokud to není JSON, zpracujeme to jako CSV/TXT (Jméno, lat, lon)
+                zText.split('\n').forEach(line => {
+                    const parts = line.split(/[;,]/);
+                    if (parts.length >= 3) {
+                        const name = parts[0].replace(/"/g, '').trim();
+                        const p1 = parseFloat(parts[1]);
+                        const p2 = parseFloat(parts[2]);
+                        if (!isNaN(p1) && !isNaN(p2)) {
+                            if (p1 > 40) trainStopsMap[name] = [p2, p1];
+                            else trainStopsMap[name] = [p1, p2];
+                        }
+                    }
+                });
+            }
+        }
+    } catch(e) { console.warn("zeleznice.txt pro vlaky nenalezeno", e); }
 
     try {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
@@ -301,7 +345,6 @@ map.on('load', async () => {
 
         map.addSource('trasy', { type: 'geojson', data: geojsonData });
 
-        // Nejspolehlivější filtr pro linky (MapLibre automaticky pod $type: LineString zahrnuje i MultiLineString)
         map.addLayer({
             id: 'lines-layer',
             type: 'line',
@@ -376,7 +419,6 @@ map.on('load', async () => {
     } catch(e) { 
         console.error("Kritická chyba při načítání dat mapy:", e); 
     } finally {
-        // Garantujeme, že načítací okno vždy zmizí, ať se děje cokoliv!
         const loader = document.getElementById('loading');
         if (loader) loader.style.display = 'none';
     }
@@ -453,7 +495,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
-                // Nový limit: zelená barva pro 0, 1 a 2 minuty
                 let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
                 let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Na čas');
                 const delaySpan = document.createElement('span');
@@ -563,6 +604,25 @@ async function handleVehicleClick(v) {
                     map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: finalTripCoords }});
                 }
             }
+        } else if (isTrain) {
+            // NOVÉ: Vykreslení trasy vlaku přes data z jízdního řádu a zeleznice.txt
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(timetableRaw, 'text/html');
+            const stopCells = doc.querySelectorAll('tbody tr td:first-child');
+            let stopCoords = [];
+
+            stopCells.forEach(cell => {
+                let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim();
+                if (trainStopsMap[rawName]) {
+                    stopCoords.push(trainStopsMap[rawName]);
+                }
+            });
+
+            // Vlaky spojujeme napřímo modrou čárou, pokud máme alespoň 2 stanice
+            if (stopCoords.length > 1) {
+                const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } };
+                map.getSource('trip-route').setData(geoJsonLine);
+            }
         }
 
         let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
@@ -572,7 +632,6 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // 1. NEKOMPROMISNÍ ODSTRANĚNÍ UNKNOWN ZPOŽDĚNÍ
         if (v.delay === -2147483648) {
             const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
             let n;
@@ -587,7 +646,6 @@ async function handleVehicleClick(v) {
             toRemoveDelay.forEach(c => c.remove());
         }
 
-        // 2. CHIRURGICKÉ ODSTRANĚNÍ SLOVA "SPOJ" PRO VLAKY A PŘEPIS "LINKY" NA "VLAK"
         if (isTrain) {
             tempDiv.querySelectorAll('th, td, span, strong, b, div, p').forEach(el => {
                 if (el && el.textContent) {
@@ -610,7 +668,6 @@ async function handleVehicleClick(v) {
             }
         }
 
-        // 3. SPOLEHLIVÉ SKRYTÍ TLAČÍTKA JÍZDNÍHO ŘÁDU
         const hasValidTimetable = timetableRaw && timetableRaw.toLowerCase().includes('<tr');
         if (!hasValidTimetable) {
             tempDiv.querySelectorAll('*').forEach(el => {
