@@ -14,7 +14,7 @@ const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.has('z')) startZoom = parseFloat(urlParams.get('z'));
 if (urlParams.has('y')) startLat = parseFloat(urlParams.get('y'));
 if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
-if (urlParams.has('line')) activeRouteGroups = urlParams.getAll('line'); // Podpora pro &line=186&line=406
+if (urlParams.has('line')) activeRouteGroups = urlParams.getAll('line'); 
 if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
 if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
 if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
@@ -290,6 +290,7 @@ map.on('load', async () => {
         console.warn("spoje.json nenalezen", e);
     }
 
+    // Načítání železničních stanic
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
         if (zRes.ok) {
@@ -346,11 +347,12 @@ map.on('load', async () => {
 
         map.addSource('trasy', { type: 'geojson', data: geojsonData });
 
+        // NEROZBITNÝ FILTR PRO LINKY: Vykreslí se cokoliv, co není Point!
         map.addLayer({
             id: 'lines-layer',
             type: 'line',
             source: 'trasy',
-            filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'MultiLineString']], 
+            filter: ['!=', ['geometry-type'], 'Point'], 
             paint: {
                 'line-color': ['get', 'color'],
                 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6],
@@ -427,7 +429,8 @@ map.on('load', async () => {
 
 // --- 4. INTERAKCE A FOCUS ---
 function highlightRoute(groups) {
-    activeRouteGroups = Array.isArray(groups) ? groups : (groups ? [groups] : []);
+    // Sjednotí vstup na pole stringů
+    activeRouteGroups = Array.isArray(groups) ? groups.map(String) : (groups ? [String(groups)] : []);
     
     if (map.getLayer('lines-layer')) {
         if (activeRouteGroups.length === 0) {
@@ -435,10 +438,22 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
         } else {
-            // Skvělý MapLibre expression pro filtrování mnoha linek najednou z pole
-            map.setPaintProperty('lines-layer', 'line-opacity', ['case', ['in', ['get', 'group'], ['literal', activeRouteGroups]], 1, 0.10]);
-            map.setPaintProperty('lines-layer', 'line-width', ['case', ['in', ['get', 'group'], ['literal', activeRouteGroups]], 6, 3]);
-            map.setPaintProperty('badges-layer', 'icon-opacity', ['case', ['in', ['get', 'group'], ['literal', activeRouteGroups]], 1, 0]);
+            // NEROZBITNÝ dynamický MATCH expression (nezávislý na verzi MapLibre/Mapbox)
+            const matchOpacity = ['match', ['to-string', ['get', 'group']]];
+            activeRouteGroups.forEach(g => matchOpacity.push(String(g), 1));
+            matchOpacity.push(0.10); // Fallback opacity
+            
+            const matchWidth = ['match', ['to-string', ['get', 'group']]];
+            activeRouteGroups.forEach(g => matchWidth.push(String(g), 6));
+            matchWidth.push(3); // Fallback width
+            
+            const matchBadge = ['match', ['to-string', ['get', 'group']]];
+            activeRouteGroups.forEach(g => matchBadge.push(String(g), 1));
+            matchBadge.push(0); // Fallback badge opacity
+            
+            map.setPaintProperty('lines-layer', 'line-opacity', matchOpacity);
+            map.setPaintProperty('lines-layer', 'line-width', matchWidth);
+            map.setPaintProperty('badges-layer', 'icon-opacity', matchBadge);
         }
     }
     updateURL();
@@ -461,18 +476,17 @@ map.on('click', (e) => {
     } else if (vFeatures.length) {
         handleVehicleClick(vFeatures[0].properties);
     } else if (lineFeatures.length) {
-        // Kliknutí na linku
-        const group = lineFeatures[0].properties.group;
+        const group = String(lineFeatures[0].properties.group);
         const isOnlySelected = activeRouteGroups.length === 1 && activeRouteGroups[0] === group;
         
         if (isOnlySelected) {
-            highlightRoute([]); // Zruší výběr, pokud klidneš znovu na tu samou
+            highlightRoute([]); 
         } else {
-            highlightRoute([group]); // Vybere jen tuto jedinou
+            highlightRoute([group]); 
             if (!isRealtimeMode) {
-                toggleRealtimeMode(true); // Aktivuje Realtime režim
+                toggleRealtimeMode(true); 
             } else {
-                fetchLiveVehicles(); // Omezí vozidla pouze na tuto linku
+                fetchLiveVehicles(); 
             }
         }
     }
@@ -549,10 +563,10 @@ let currentPopup = null;
 async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
-    highlightRoute([]); // Odznačíme zbytek mapy pro čistý detail vozidla
+    highlightRoute([]); // Odznačí okolní trasy a ukáže jen tuto
 
     const isTrain = v.traction === 'TRAIN';
-    const routeToHighlight = isTrain ? v.text : v.text.replace(/\D/g, '').slice(-3); 
+    const routeToHighlight = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3); 
 
     try {
         const [infoRaw, timetableRaw] = await Promise.all([
@@ -565,7 +579,7 @@ async function handleVehicleClick(v) {
         if (!isTrain && geojsonData) {
             let multiLineCoords = [];
             geojsonData.features.forEach(f => {
-                if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && f.properties.group === routeToHighlight) {
+                if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) {
                     if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
                     else multiLineCoords.push(...f.geometry.coordinates);
                 }
@@ -620,7 +634,7 @@ async function handleVehicleClick(v) {
                 }
             }
         } else if (isTrain) {
-            // Vykreslení trasy vlaku přes data z jízdního řádu a zeleznice.txt
+            // Vykreslení trasy vlaku přes zeleznice.txt
             const parser = new DOMParser();
             const doc = parser.parseFromString(timetableRaw, 'text/html');
             const stopCells = doc.querySelectorAll('tbody tr td:first-child');
@@ -754,11 +768,11 @@ async function fetchLiveVehicles() {
 
         const geojson = {
             type: 'FeatureCollection',
-            // FILTRACE VOZIDEL DLE VYBRANÝCH LINEK (Aktivováno z URL nebo kliknutím)
+            // FILTRACE VOZIDEL DLE VYBRANÝCH LINEK
             features: data.filter(v => {
                 if (activeRouteGroups.length > 0) {
                     const isTrain = v.traction === 'TRAIN';
-                    const routeOfVehicle = isTrain ? v.text : v.text.replace(/\D/g, '').slice(-3);
+                    const routeOfVehicle = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3);
                     return activeRouteGroups.includes(routeOfVehicle);
                 }
                 return true;
@@ -790,6 +804,7 @@ async function fetchLiveVehicles() {
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
+        // Rozklikne se automaticky při otevření přes URL
         if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
             const vToClick = data.find(item => item.id === selectedVehicleId);
             if (vToClick) {
