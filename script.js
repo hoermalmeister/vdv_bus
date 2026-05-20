@@ -6,7 +6,7 @@ let isRealtimeMode = false;
 let selectedVehicleId = null;
 let isTimetableOpen = false;
 let rtInterval = null;
-let initialLoadAutoClickDone = false; // Pojistka pro auto-kliknutí z URL po startu
+let initialLoadAutoClickDone = false; // Pojistka pro automatické rozkliknutí z URL po startu
 
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.has('z')) startZoom = parseFloat(urlParams.get('z'));
@@ -50,6 +50,7 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
+// Bezpečná oprava chybějících mezer za čárkami
 function fixCommasInHtml(htmlString) {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = htmlString;
@@ -63,6 +64,7 @@ function fixCommasInHtml(htmlString) {
     return tempDiv.innerHTML;
 }
 
+// Čistička bezbariérovosti
 function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li').forEach(el => {
         const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -163,12 +165,13 @@ function updateURL() {
     if (isRealtimeMode) params.set('rt', '1');
     else if (activeRouteGroup) params.set('line', activeRouteGroup);
     if (selectedVehicleId) params.set('id', selectedVehicleId);
-    if (isTimetableOpen) params.set('tt', '1'); // Přidána podpora &tt=1 do URL
+    if (isTimetableOpen) params.set('tt', '1');
     window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
+
 
 // --- 2. VYKRESLOVÁNÍ GRAFIKY (High-DPI Canvas Baking) ---
 const PIXEL_RATIO = 2; 
@@ -236,24 +239,19 @@ function getVehicleIcon(delayClass, label, isTrain) {
     else if (delayClass === 'dim') { bgColor = '#1a2530'; borderColor = '#2c3e50'; textColor = '#5dade2'; }
 
     ctx.beginPath();
-    
     if (isTrain) {
-        // Tady se kreslí čtverec se zaoblenými rohy pro VLAKY
-        const r = 6; // Poloměr rohů
-        const s = 26; // Velikost samotného čtverce
-        const offset = 2; // Odsazení od kraje plátna
-        ctx.moveTo(offset + r, offset);
-        ctx.lineTo(offset + s - r, offset);
-        ctx.quadraticCurveTo(offset + s, offset, offset + s, offset + r);
-        ctx.lineTo(offset + s, offset + s - r);
-        ctx.quadraticCurveTo(offset + s, offset + s, offset + s - r, offset + s);
-        ctx.lineTo(offset + r, offset + s);
-        ctx.quadraticCurveTo(offset, offset + s, offset, offset + s - r);
-        ctx.lineTo(offset, offset + r);
-        ctx.quadraticCurveTo(offset, offset, offset + r, offset);
+        const br = 6; const s = 26; const offset = 2;
+        ctx.moveTo(offset + br, offset);
+        ctx.lineTo(offset + s - br, offset);
+        ctx.quadraticCurveTo(offset + s, offset, offset + s, offset + br);
+        ctx.lineTo(offset + s, offset + s - br);
+        ctx.quadraticCurveTo(offset + s, offset + s, offset + s - br, offset + s);
+        ctx.lineTo(offset + br, offset + s);
+        ctx.quadraticCurveTo(offset, offset + s, offset, offset + s - br);
+        ctx.lineTo(offset, offset + br);
+        ctx.quadraticCurveTo(offset, offset, offset + br, offset);
         ctx.closePath();
     } else {
-        // Tradiční kolečko pro AUTOBUSY
         ctx.arc(size/2, size/2, 13, 0, Math.PI * 2);
     }
     
@@ -425,7 +423,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
     
-    // Zapíšeme do globálního stavu, že je tabulka otevřená a zaktualizujeme URL
     isTimetableOpen = true;
     updateURL();
 
@@ -445,6 +442,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             if (bottomRow) bottomRow.remove();
         }
         
+        // Pokud je zpoždění známé (a není unknown), ukážeme ho
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
@@ -565,13 +563,57 @@ async function handleVehicleClick(v) {
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
+
+        // 1. NEUKAZOVAT UNKNOWN ZPOŽDĚNÍ V DETALU VOZIDLA
+        if (v.delay === -2147483648) {
+            tempDiv.querySelectorAll('tr, div, p, span').forEach(el => {
+                const normTxt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                if (normTxt.includes('zpozdeni')) {
+                    el.remove();
+                }
+            });
+        }
+
+        // 2. LOGIKA PRO VLAKY (Rt Vlaku -> Vlak místo Linka, skrýt Spoj)
+        if (isTrain) {
+            tempDiv.querySelectorAll('tr').forEach(tr => {
+                const normTxt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                if (normTxt.includes('spoj:')) {
+                    tr.remove(); // Odstraníme celý řádek se Spojem natvrdo
+                }
+                tr.querySelectorAll('th, td, span, b').forEach(cell => {
+                    if (cell.textContent.trim() === 'Linka:') {
+                        cell.textContent = 'Vlak:';
+                    } else if (cell.textContent.trim() === 'Linka') {
+                        cell.textContent = 'Vlak';
+                    }
+                });
+            });
+        }
+
+        // 3. PREVENTIVNÍ KONTROLA: Pokud se nepodařilo jízdní řád načíst, odebereme tlačítko
+        if (timetableRaw.includes("Jízdní řád se nepodařilo načíst.") || timetableRaw.trim() === "") {
+            tempDiv.querySelectorAll('button, a, div').forEach(el => {
+                if (el.outerHTML.includes('openTimetable') || el.outerHTML.includes('loadTimetable') || el.textContent.toLowerCase().includes('jizdni rad')) {
+                    el.remove(); // Tlačítko vůbec nevyrobíme
+                }
+            });
+        }
+
         cleanHtml = tempDiv.innerHTML;
 
         if (window.innerWidth <= 768) {
             const bar = document.getElementById('mobile-bottom-bar');
             document.getElementById('mobile-bar-content').innerHTML = cleanHtml;
             bar.classList.remove('hidden');
-            bar.onclick = function(e) { if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) openTimetable(v.id, v.delay); };
+            bar.onclick = function(e) { 
+                if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
+                    // Otevřeme jízdní řád pouze tehdy, pokud tlačítko v HTML přežilo čističku
+                    if (cleanHtml.includes('openTimetable')) {
+                        openTimetable(v.id, v.delay); 
+                    }
+                } 
+            };
         } else {
             if (currentPopup) currentPopup.remove();
             currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(cleanHtml).addTo(map);
@@ -647,7 +689,7 @@ async function fetchLiveVehicles() {
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
-        // Pojistka pro auto-kliknutí po načtení z URL linku!
+        // Automatické rozkliknutí po načtení z URL linku (včetně detekce otevřené tabulky)
         if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
             const vToClick = data.find(item => item.id === selectedVehicleId);
             if (vToClick) {
