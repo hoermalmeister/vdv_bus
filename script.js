@@ -47,11 +47,9 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// --- 2. VÝPOČTY VZDÁLENOSTÍ BEZ LEAFLETU ---
 function getDistance(pt1, pt2) {
-    const dx = pt1[0] - pt2[0];
-    const dy = pt1[1] - pt2[1];
-    return Math.sqrt(dx*dx + dy*dy) * 111000; // Zjednodušený převod na metry
+    const dx = pt1[0] - pt2[0], dy = pt1[1] - pt2[1];
+    return Math.sqrt(dx*dx + dy*dy) * 111000;
 }
 
 function normalizeStopName(name) {
@@ -146,35 +144,91 @@ function updateURL() {
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
 
+// --- 2. TVORBA NATIVNÍCH GPU IKONEK PŘES CANVAS ---
+
+// Tvorba koleček pro živá vozidla
+function createVehicleIcon(bgColor, borderColor = '#ffffff') {
+    const size = 32;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.beginPath();
+    ctx.arc(size/2, size/2, 14, 0, Math.PI * 2);
+    ctx.fillStyle = bgColor; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = borderColor; ctx.stroke();
+    return ctx.getImageData(0, 0, size, size);
+}
+
+// Tvorba CSS quasi-obdélníčku pro štítky linky
+function createBadgeIcon(borderColor) {
+    const width = 42; const height = 24;
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = 'rgba(20, 20, 20, 0.95)';
+    ctx.beginPath();
+    const radius = 6;
+    ctx.moveTo(1 + radius, 1);
+    ctx.lineTo(width - 1 - radius, 1);
+    ctx.quadraticCurveTo(width - 1, 1, width - 1, 1 + radius);
+    ctx.lineTo(width - 1, height - 1 - radius);
+    ctx.quadraticCurveTo(width - 1, height - 1, width - 1 - radius, height - 1);
+    ctx.lineTo(1 + radius, height - 1);
+    ctx.quadraticCurveTo(1, height - 1, 1, height - 1 - radius);
+    ctx.lineTo(1, 1 + radius);
+    ctx.quadraticCurveTo(1, 1, 1 + radius, 1);
+    ctx.closePath();
+
+    ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = borderColor; ctx.stroke();
+    return ctx.getImageData(0, 0, width, height);
+}
+
+
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
     
-    // Slovník spojů
+    // Zaregistrujeme ikonky vozidel rovnou do GPU
+    map.addImage('v-ok', createVehicleIcon('#58d68d'));
+    map.addImage('v-warn', createVehicleIcon('#f39c12'));
+    map.addImage('v-alert', createVehicleIcon('#e74c3c'));
+    map.addImage('v-unknown', createVehicleIcon('#7f8c8d'));
+    map.addImage('v-dim', createVehicleIcon('#1a2530', '#2c3e50')); 
+
     fetch('spoje.json?t=' + new Date().getTime()).then(r => r.json()).then(data => { tripShapes = data; });
 
-    // GeoJSON
     try {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
         geojsonData = await res.json();
         
+        const badgeColors = new Set();
+
         geojsonData.features.forEach(f => {
             if (f.geometry.type === 'Point' && f.properties.type === 'stop') {
                 allStops.push({
-                    coords: f.geometry.coordinates, // MapLibre formát [lng, lat]
+                    coords: f.geometry.coordinates,
                     name: f.properties.name,
                     normalized: normalizeStopName(f.properties.name)
                 });
             }
+            if (f.geometry.type === 'Point' && f.properties.type === 'badge') {
+                badgeColors.add(f.properties.color);
+            }
+        });
+
+        // Vygenerujeme obdélníčky štítků rovnou do GPU
+        badgeColors.forEach(color => {
+            map.addImage(`badge-${color}`, createBadgeIcon(color));
         });
 
         map.addSource('trasy', { type: 'geojson', data: geojsonData });
 
-        // Tlusté čáry linek
         map.addLayer({
             id: 'lines-layer',
             type: 'line',
             source: 'trasy',
-            filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'Polygon']], 
+            filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'MultiLineString']], 
             paint: {
                 'line-color': ['get', 'color'],
                 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6],
@@ -182,27 +236,25 @@ map.on('load', async () => {
             }
         });
 
-        // Barevné štítky linek na silnicích
+        // TADY SE VYKRESLUJÍ ŠTÍTKY (Nerozbitně spojený Text a GPU Obdélník)
         map.addLayer({
             id: 'badges-layer',
             type: 'symbol',
             source: 'trasy',
             filter: ['==', ['get', 'type'], 'badge'],
             layout: {
+                'icon-image': ['concat', 'badge-', ['get', 'color']],
                 'text-field': ['get', 'group'],
                 'text-font': ['Open Sans Bold'],
-                'text-size': 13, 
-                'text-anchor': 'center'
+                'text-size': 12,
+                'icon-allow-overlap': false, // MapLibre automaticky schová štítky při kolizi!
+                'text-allow-overlap': false
             },
             paint: {
-                'text-color': '#ffffff',
-                'text-halo-color': ['get', 'color'],
-                'text-halo-width': 3,
-                'text-halo-blur': 1 // NOVÉ: Přidá lehký antialiasing, hrany nebudou zubaté
+                'text-color': '#fff'
             }
         });
 
-        // Tečky zastávek
         map.addLayer({
             id: 'stops-layer',
             type: 'circle',
@@ -212,7 +264,6 @@ map.on('load', async () => {
             paint: { 'circle-radius': 4, 'circle-color': '#58d68d', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 }
         });
 
-        // Názvy zastávek
         map.addLayer({
             id: 'stops-text-layer',
             type: 'symbol',
@@ -221,7 +272,6 @@ map.on('load', async () => {
             filter: ['all', ['==', ['get', 'type'], 'stop'], ['==', ['get', 'show_label'], true]],
             layout: {
                 'text-field': ['get', 'name'],
-                'text-font': ['Open Sans Regular'],
                 'text-size': 12,
                 'text-anchor': 'bottom',
                 'text-offset': [0, -0.6]
@@ -229,7 +279,6 @@ map.on('load', async () => {
             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
         });
 
-        // Osobní trasa spoje
         map.addSource('trip-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         map.addLayer({
             id: 'trip-route-layer',
@@ -238,25 +287,22 @@ map.on('load', async () => {
             paint: { 'line-color': '#00e5ff', 'line-width': 5, 'line-opacity': 1 }
         });
 
-        // Živá vozidla
+        // TADY SE VYKRESLUJÍ VOZIDLA (Kolečko + Text v jednom objektu)
         map.addSource('vehicles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         map.addLayer({
-            id: 'vehicles-bg',
-            type: 'circle',
-            source: 'vehicles',
-            paint: { 'circle-radius': 14, 'circle-color': ['get', 'colorHex'], 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' }
-        });
-        map.addLayer({
-            id: 'vehicles-text',
+            id: 'vehicles-layer',
             type: 'symbol',
             source: 'vehicles',
-            layout: { 
-                'text-field': ['get', 'shortLabel'], 
-                'text-font': ['Open Sans Bold'], 
-                'text-size': 12
+            layout: {
+                'icon-image': ['get', 'iconName'],
+                'text-field': ['get', 'shortLabel'],
+                'text-font': ['Open Sans Bold'],
+                'text-size': 12,
+                'icon-allow-overlap': false, // Pokud se autobusy sjedou, schovají se (společně)
+                'text-allow-overlap': false
             },
-            paint: { 
-                'text-color': ['get', 'textColorHex'] 
+            paint: {
+                'text-color': ['get', 'textColorHex']
             }
         });
 
@@ -276,18 +322,19 @@ function highlightRoute(group) {
             map.setPaintProperty('lines-layer', 'line-opacity', isRealtimeMode ? 0.10 : 0.9);
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'text-opacity', isRealtimeMode ? 0 : 1);
+            map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
         } else {
             map.setPaintProperty('lines-layer', 'line-opacity', ['case', ['==', ['get', 'group'], activeRouteGroup], 1, 0.10]);
             map.setPaintProperty('lines-layer', 'line-width', ['case', ['==', ['get', 'group'], activeRouteGroup], 6, 3]);
             map.setPaintProperty('badges-layer', 'text-opacity', ['case', ['==', ['get', 'group'], activeRouteGroup], 1, 0]);
+            map.setPaintProperty('badges-layer', 'icon-opacity', ['case', ['==', ['get', 'group'], activeRouteGroup], 1, 0]);
         }
     }
     updateURL();
 }
 
-// Kliknutí do mapy
 map.on('click', (e) => {
-    const vFeatures = map.queryRenderedFeatures(e.point, { layers: ['vehicles-bg', 'vehicles-text'] });
+    const vFeatures = map.queryRenderedFeatures(e.point, { layers: ['vehicles-layer'] });
     const lineFeatures = map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
 
     if (!vFeatures.length && !lineFeatures.length) {
@@ -296,6 +343,7 @@ map.on('click', (e) => {
             selectedVehicleId = null;
             map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
             document.getElementById('mobile-bottom-bar').classList.add('hidden');
+            if (currentPopup) currentPopup.remove();
             if (isRealtimeMode) highlightRoute(null);
             updateURL();
         }
@@ -307,12 +355,12 @@ map.on('click', (e) => {
     }
 });
 
-map.on('mouseenter', 'vehicles-bg', () => map.getCanvas().style.cursor = 'pointer');
-map.on('mouseleave', 'vehicles-bg', () => map.getCanvas().style.cursor = '');
+map.on('mouseenter', 'vehicles-layer', () => map.getCanvas().style.cursor = 'pointer');
+map.on('mouseleave', 'vehicles-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
 window.openTimetable = async function(vehicleId, delayInMinutes) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
@@ -381,7 +429,7 @@ async function handleVehicleClick(v) {
 
         map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
-        if (!isTrain) {
+        if (!isTrain && geojsonData) {
             let multiLineCoords = [];
             geojsonData.features.forEach(f => {
                 if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && f.properties.group === routeToHighlight) {
@@ -414,14 +462,9 @@ async function handleVehicleClick(v) {
             const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
 
             if (rawCoords && rawCoords.length > 1) {
-                // Skript z Pythonu nám vrátil data rychle a spolehlivě!
-                const geoJsonLine = {
-                    type: 'Feature',
-                    geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) }
-                };
+                const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } };
                 map.getSource('trip-route').setData(geoJsonLine);
             } else {
-                // FALLBACK: Skládání z bodů na mapě
                 const stopCells = doc.querySelectorAll('tbody tr td:first-child');
                 let stopCoords = [];
                 let previousCoord = null;
@@ -459,7 +502,7 @@ async function handleVehicleClick(v) {
     } catch(e) { console.error("Nelze načíst detail vozidla", e); }
 }
 
-// --- 6. ENGINE PRO ŽIVÁ VOZIDLA ---
+// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (ČISTÉ WEBGL) ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
@@ -503,15 +546,15 @@ async function fetchLiveVehicles() {
                 const isTrain = v.traction === 'TRAIN';
                 const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
                 
-                let bgColor = '#58d68d'; 
+                let iconName = 'v-ok';
                 let textColor = '#111';
                 
-                if (v.delay === -2147483648) bgColor = '#7f8c8d';
-                else if (v.delay > 0 && v.delay <= 9) bgColor = '#f39c12';
-                else if (v.delay >= 10) bgColor = '#e74c3c';
+                if (v.delay === -2147483648) iconName = 'v-unknown';
+                else if (v.delay > 0 && v.delay <= 9) iconName = 'v-warn';
+                else if (v.delay >= 10) { iconName = 'v-alert'; textColor = '#fff'; }
 
                 if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
-                    bgColor = '#1a2530'; 
+                    iconName = 'v-dim'; 
                     textColor = '#5dade2';
                 }
 
@@ -521,7 +564,7 @@ async function fetchLiveVehicles() {
                     properties: {
                         id: v.id, delay: v.delay, traction: v.traction, text: v.text, lng: v.lng, lat: v.lat,
                         shortLabel: isTrain ? 'V' : shortLine, 
-                        colorHex: bgColor, textColorHex: textColor
+                        iconName: iconName, textColorHex: textColor
                     }
                 };
             })
