@@ -64,7 +64,7 @@ function fixCommasInHtml(htmlString) {
 }
 
 function removeWheelchairInfo(tempDiv) {
-    tempDiv.querySelectorAll('tr, .level, .columns, li').forEach(el => {
+    tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
         const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
         if (txt.includes('bezbari')) {
             el.remove();
@@ -559,36 +559,59 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // 1. SCHOVÁNÍ UNKNOWN ZPOŽDĚNÍ
+        // 1. NEKOMPROMISNÍ ODSTRANĚNÍ UNKNOWN ZPOŽDĚNÍ
         if (v.delay === -2147483648) {
-            tempDiv.querySelectorAll('tr, li').forEach(el => {
-                const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                if (txt.includes('zpozdeni')) el.remove();
-            });
-        }
-
-        // 2. ÚPRAVA PRO VLAKY (Skrytí "Spoj:", "Linka" -> "Vlak")
-        if (isTrain) {
-            tempDiv.querySelectorAll('tr, li').forEach(el => {
-                const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                if (txt.includes('spoj:')) el.remove();
-            });
-            // TreeWalker pro bezpečný přepis pouhého textu uvnitř tabulky
-            const walker = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
-            let node;
-            while ((node = walker.nextNode())) {
-                if (node.nodeValue.includes('Linka')) {
-                    node.nodeValue = node.nodeValue.replace('Linka', 'Vlak');
+            const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
+            let n;
+            let toRemoveDelay = [];
+            while ((n = walkerDelay.nextNode())) {
+                if (n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('zpozdeni')) {
+                    let p = n.parentElement;
+                    let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
+                    if (container && !toRemoveDelay.includes(container)) toRemoveDelay.push(container);
                 }
             }
+            toRemoveDelay.forEach(c => c.remove());
         }
 
-        // 3. SKRYTÍ MOŽNOSTI ZOBRAZIT JÍZDNÍ ŘÁD (pokud řád selhal načíst)
-        if (!timetableRaw || timetableRaw.includes("Jízdní řád se nepodařilo načíst.") || timetableRaw.trim() === "") {
-            tempDiv.querySelectorAll('[onclick*="openTimetable"], [onclick*="loadTimetable"]').forEach(el => el.remove());
-            tempDiv.querySelectorAll('button, a, .button').forEach(el => {
-                const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                if (txt.includes('jizdni rad')) el.remove();
+        // 2. CHIRURGICKÉ ODSTRANĚNÍ SLOVA "SPOJ:" PRO VLAKY A PŘEPIS "LINKY" NA "VLAK"
+        if (isTrain) {
+            const walkerTrain = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
+            let n;
+            let toRemoveTrain = [];
+            while ((n = walkerTrain.nextNode())) {
+                let txt = n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                
+                // Pokud text obsahuje "spoj", najdeme jeho rodičovský kontejner a smažeme ho celý
+                if (txt.includes('spoj:')) {
+                    let p = n.parentElement;
+                    let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
+                    if (container && !toRemoveTrain.includes(container)) toRemoveTrain.push(container);
+                }
+                
+                // Přepíšeme čistě textovou hodnotu Linky na Vlak
+                if (n.nodeValue.includes('Linka')) {
+                    n.nodeValue = n.nodeValue.replace('Linka', 'Vlak');
+                } else if (n.nodeValue.includes('linka')) {
+                    n.nodeValue = n.nodeValue.replace('linka', 'vlak');
+                }
+            }
+            toRemoveTrain.forEach(c => c.remove());
+        }
+
+        // 3. SPOLEHLIVÉ SKRYTÍ TLAČÍTKA JÍZDNÍHO ŘÁDU (Když řád de-facto neexistuje)
+        // Pokud stažený řád neobsahuje tabulkový řádek (<tr), považujeme ho za prázdný/neplatný
+        const hasValidTimetable = timetableRaw && timetableRaw.toLowerCase().includes('<tr');
+        if (!hasValidTimetable) {
+            tempDiv.querySelectorAll('*').forEach(el => {
+                const onclickAttr = el.getAttribute('onclick') || '';
+                const textContent = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                
+                // Smaže cokoliv, co má v onclick "openTimetable" nebo "loadTimetable" 
+                // NEBO smaže tlačítko/odkaz, které obsahuje text "jizdni rad"
+                if (onclickAttr.includes('openTimetable') || onclickAttr.includes('loadTimetable') || ((el.tagName === 'BUTTON' || el.tagName === 'A') && textContent.includes('jizdni rad'))) {
+                    el.remove();
+                }
             });
         }
 
@@ -600,7 +623,7 @@ async function handleVehicleClick(v) {
             bar.classList.remove('hidden');
             bar.onclick = function(e) { 
                 if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
-                    // Otevře jen tehdy, pokud v HTML po čištění zbylo volání openTimetable
+                    // Poslední pojistka: Panel proklikne na tabulku jen tehdy, když kód tlačítka přežil čističku
                     if (cleanHtml.includes('openTimetable')) {
                         openTimetable(v.id, v.delay); 
                     }
@@ -681,6 +704,7 @@ async function fetchLiveVehicles() {
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
+        // Automatické rozkliknutí po načtení z URL linku
         if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
             const vToClick = data.find(item => item.id === selectedVehicleId);
             if (vToClick) {
