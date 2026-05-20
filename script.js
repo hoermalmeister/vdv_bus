@@ -60,6 +60,17 @@ function fixCommasInHtml(htmlString) {
     return tempDiv.innerHTML;
 }
 
+// Neoblomná čistička bezbariérovosti
+function removeWheelchairInfo(tempDiv) {
+    tempDiv.querySelectorAll('tr, .level, .columns, li').forEach(el => {
+        // Odstraní háčky a čárky a převede na malá písmena, takže chytí cokoliv s "bezbari"
+        const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        if (txt.includes('bezbari')) {
+            el.remove();
+        }
+    });
+}
+
 function getDistance(pt1, pt2) {
     const dx = pt1[0] - pt2[0], dy = pt1[1] - pt2[1];
     return Math.sqrt(dx*dx + dy*dy) * 111000;
@@ -400,12 +411,8 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
 
-        // ODSTRANĚNÍ NEPOTŘEBNÉ BEZBARIÉROVOSTI Z TABULKY JÍZDNÍHO ŘÁDU
-        tempDiv.querySelectorAll('tr').forEach(tr => {
-            if (tr.textContent.toLowerCase().includes('bezbariér')) {
-                tr.remove();
-            }
-        });
+        // Opravené nemilosrdné smazání řádku bezbariérovosti
+        removeWheelchairInfo(tempDiv);
 
         const legend = tempDiv.querySelector('#timetableColorsLegend');
         if (legend) {
@@ -524,18 +531,14 @@ async function handleVehicleClick(v) {
         }
 
         let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
-        
-        // ZAVOLÁNÍ OPRAVY ČÁREK PŘED ZOBRAZENÍM VYSKAKOVACÍ BUBLINY/LIŠTY
         cleanHtml = fixCommasInHtml(cleanHtml);
 
-        // ODSTRANĚNÍ NEPOTŘEBNÉ BEZBARIÉROVOSTI Z DETAILU VOZIDLA
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
-        tempDiv.querySelectorAll('tr').forEach(tr => {
-            if (tr.textContent.toLowerCase().includes('bezbariér')) {
-                tr.remove();
-            }
-        });
+        
+        // Opravené smazání i z panelu vozidla
+        removeWheelchairInfo(tempDiv);
+        
         cleanHtml = tempDiv.innerHTML;
 
         if (window.innerWidth <= 768) {
@@ -620,7 +623,6 @@ async function fetchLiveVehicles() {
     } catch (e) { console.error("Chyba RT dat:", e); }
 }
 
-// --- 7. TLAČÍTKA LOKALIZACE A SEVERKY ---
 const locateBtn = document.getElementById('locate-btn');
 if(locateBtn) locateBtn.addEventListener('click', () => {
     if ("geolocation" in navigator) {
@@ -630,26 +632,35 @@ if(locateBtn) locateBtn.addEventListener('click', () => {
     }
 });
 
-// Automatické generování tlačítka Severky
+// --- 7. INTELIGENTNÍ KOMPAS (SEVERKA) ---
 const compassBtn = document.createElement('div');
 compassBtn.id = 'compass-btn';
-compassBtn.className = 'hidden';
-// SVG šipka kompasu ukazující nahoru
 compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
+// Kompletní styling kompasu je vložen přímo z JS, nepotřebuješ pro něj CSS
+compassBtn.style.cssText = `
+    position: absolute; right: 20px; bottom: 138px; z-index: 1000;
+    background: rgba(20, 20, 20, 0.85); backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 50%;
+    width: 44px; height: 44px; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    display: none; align-items: center; justify-content: center;
+    transition: opacity 0.2s ease;
+`;
 document.body.appendChild(compassBtn);
 
 compassBtn.addEventListener('click', () => {
     map.resetNorth({ duration: 500 });
 });
 
-// Skrývání a zobrazování severky při rotaci mapy
-map.on('rotate', () => {
+// Extrémně tolerantní kontrola pro mobily (zachytí i mikrorotace a odpálí se i při pohybu prstem)
+function updateCompass() {
     const bearing = map.getBearing();
-    if (bearing === 0) {
-        compassBtn.classList.add('hidden');
+    if (Math.abs(bearing) < 0.5) {
+        compassBtn.style.display = 'none';
     } else {
-        compassBtn.classList.remove('hidden');
-        // Natočení ikony šipky tak, aby neustále ukazovala k reálnému severu
+        compassBtn.style.display = 'flex';
         compassBtn.querySelector('svg').style.transform = `rotate(${-bearing}deg)`;
     }
-});
+}
+map.on('rotate', updateCompass);
+map.on('move', updateCompass);
