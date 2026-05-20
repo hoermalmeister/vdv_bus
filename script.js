@@ -4,7 +4,9 @@ let startLng = 15.6;
 let initialRoute = null;
 let isRealtimeMode = false;
 let selectedVehicleId = null;
+let isTimetableOpen = false;
 let rtInterval = null;
+let initialLoadAutoClickDone = false; // Pojistka pro auto-kliknutí z URL po startu
 
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.has('z')) startZoom = parseFloat(urlParams.get('z'));
@@ -13,6 +15,7 @@ if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
 if (urlParams.has('line')) initialRoute = urlParams.get('line');
 if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
 if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
+if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
 
 let geojsonData = null;
 let allStops = [];
@@ -60,10 +63,8 @@ function fixCommasInHtml(htmlString) {
     return tempDiv.innerHTML;
 }
 
-// Neoblomná čistička bezbariérovosti
 function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li').forEach(el => {
-        // Odstraní háčky a čárky a převede na malá písmena, takže chytí cokoliv s "bezbari"
         const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
         if (txt.includes('bezbari')) {
             el.remove();
@@ -162,6 +163,7 @@ function updateURL() {
     if (isRealtimeMode) params.set('rt', '1');
     else if (activeRouteGroup) params.set('line', activeRouteGroup);
     if (selectedVehicleId) params.set('id', selectedVehicleId);
+    if (isTimetableOpen) params.set('tt', '1'); // Přidána podpora &tt=1 do URL
     window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
@@ -234,7 +236,27 @@ function getVehicleIcon(delayClass, label, isTrain) {
     else if (delayClass === 'dim') { bgColor = '#1a2530'; borderColor = '#2c3e50'; textColor = '#5dade2'; }
 
     ctx.beginPath();
-    ctx.arc(size/2, size/2, 13, 0, Math.PI * 2);
+    
+    if (isTrain) {
+        // Tady se kreslí čtverec se zaoblenými rohy pro VLAKY
+        const r = 6; // Poloměr rohů
+        const s = 26; // Velikost samotného čtverce
+        const offset = 2; // Odsazení od kraje plátna
+        ctx.moveTo(offset + r, offset);
+        ctx.lineTo(offset + s - r, offset);
+        ctx.quadraticCurveTo(offset + s, offset, offset + s, offset + r);
+        ctx.lineTo(offset + s, offset + s - r);
+        ctx.quadraticCurveTo(offset + s, offset + s, offset + s - r, offset + s);
+        ctx.lineTo(offset + r, offset + s);
+        ctx.quadraticCurveTo(offset, offset + s, offset, offset + s - r);
+        ctx.lineTo(offset, offset + r);
+        ctx.quadraticCurveTo(offset, offset, offset + r, offset);
+        ctx.closePath();
+    } else {
+        // Tradiční kolečko pro AUTOBUSY
+        ctx.arc(size/2, size/2, 13, 0, Math.PI * 2);
+    }
+    
     ctx.fillStyle = bgColor; ctx.fill();
     ctx.lineWidth = 2; ctx.strokeStyle = borderColor; ctx.stroke();
 
@@ -403,6 +425,10 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
     document.getElementById('timetable-modal').classList.remove('hidden');
     
+    // Zapíšeme do globálního stavu, že je tabulka otevřená a zaktualizujeme URL
+    isTimetableOpen = true;
+    updateURL();
+
     try {
         let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
@@ -411,7 +437,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
 
-        // Opravené nemilosrdné smazání řádku bezbariérovosti
         removeWheelchairInfo(tempDiv);
 
         const legend = tempDiv.querySelector('#timetableColorsLegend');
@@ -451,7 +476,11 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     } catch(e) { document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
-window.closeTimetable = function() { document.getElementById('timetable-modal').classList.add('hidden'); };
+window.closeTimetable = function() { 
+    document.getElementById('timetable-modal').classList.add('hidden'); 
+    isTimetableOpen = false;
+    updateURL();
+};
 
 let currentPopup = null;
 
@@ -535,10 +564,7 @@ async function handleVehicleClick(v) {
 
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = cleanHtml;
-        
-        // Opravené smazání i z panelu vozidla
         removeWheelchairInfo(tempDiv);
-        
         cleanHtml = tempDiv.innerHTML;
 
         if (window.innerWidth <= 768) {
@@ -620,6 +646,19 @@ async function fetchLiveVehicles() {
         };
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
+
+        // Pojistka pro auto-kliknutí po načtení z URL linku!
+        if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
+            const vToClick = data.find(item => item.id === selectedVehicleId);
+            if (vToClick) {
+                handleVehicleClick(vToClick);
+                if (isTimetableOpen) {
+                    openTimetable(vToClick.id, vToClick.delay);
+                }
+            }
+            initialLoadAutoClickDone = true;
+        }
+
     } catch (e) { console.error("Chyba RT dat:", e); }
 }
 
@@ -636,7 +675,6 @@ if(locateBtn) locateBtn.addEventListener('click', () => {
 const compassBtn = document.createElement('div');
 compassBtn.id = 'compass-btn';
 compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
-// Kompletní styling kompasu je vložen přímo z JS, nepotřebuješ pro něj CSS
 compassBtn.style.cssText = `
     position: absolute; right: 20px; bottom: 138px; z-index: 1000;
     background: rgba(20, 20, 20, 0.85); backdrop-filter: blur(8px);
@@ -652,7 +690,6 @@ compassBtn.addEventListener('click', () => {
     map.resetNorth({ duration: 500 });
 });
 
-// Extrémně tolerantní kontrola pro mobily (zachytí i mikrorotace a odpálí se i při pohybu prstem)
 function updateCompass() {
     const bearing = map.getBearing();
     if (Math.abs(bearing) < 0.5) {
