@@ -6,7 +6,7 @@ let isRealtimeMode = false;
 let selectedVehicleId = null;
 let isTimetableOpen = false;
 let rtInterval = null;
-let initialLoadAutoClickDone = false; // Pojistka pro automatické rozkliknutí z URL po startu
+let initialLoadAutoClickDone = false; 
 
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.has('z')) startZoom = parseFloat(urlParams.get('z'));
@@ -50,7 +50,6 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// Bezpečná oprava chybějících mezer za čárkami
 function fixCommasInHtml(htmlString) {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = htmlString;
@@ -64,7 +63,6 @@ function fixCommasInHtml(htmlString) {
     return tempDiv.innerHTML;
 }
 
-// Čistička bezbariérovosti
 function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li').forEach(el => {
         const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -172,8 +170,7 @@ function updateURL() {
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
 
-
-// --- 2. VYKRESLOVÁNÍ GRAFIKY (High-DPI Canvas Baking) ---
+// --- 2. VYKRESLOVÁNÍ GRAFIKY ROVNOU DO PAMĚTI KARTY ---
 const PIXEL_RATIO = 2; 
 
 function getBadgeIcon(group, color) {
@@ -273,7 +270,6 @@ function getVehicleIcon(delayClass, label, isTrain) {
     map.addImage(id, ctx.getImageData(0, 0, size * PIXEL_RATIO, size * PIXEL_RATIO), { pixelRatio: PIXEL_RATIO });
     return id;
 }
-
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
@@ -442,7 +438,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             if (bottomRow) bottomRow.remove();
         }
         
-        // Pokud je zpoždění známé (a není unknown), ukážeme ho
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
@@ -564,39 +559,36 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // 1. NEUKAZOVAT UNKNOWN ZPOŽDĚNÍ V DETALU VOZIDLA
+        // 1. SCHOVÁNÍ UNKNOWN ZPOŽDĚNÍ
         if (v.delay === -2147483648) {
-            tempDiv.querySelectorAll('tr, div, p, span').forEach(el => {
-                const normTxt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                if (normTxt.includes('zpozdeni')) {
-                    el.remove();
-                }
+            tempDiv.querySelectorAll('tr, li').forEach(el => {
+                const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                if (txt.includes('zpozdeni')) el.remove();
             });
         }
 
-        // 2. LOGIKA PRO VLAKY (Rt Vlaku -> Vlak místo Linka, skrýt Spoj)
+        // 2. ÚPRAVA PRO VLAKY (Skrytí "Spoj:", "Linka" -> "Vlak")
         if (isTrain) {
-            tempDiv.querySelectorAll('tr').forEach(tr => {
-                const normTxt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                if (normTxt.includes('spoj:')) {
-                    tr.remove(); // Odstraníme celý řádek se Spojem natvrdo
-                }
-                tr.querySelectorAll('th, td, span, b').forEach(cell => {
-                    if (cell.textContent.trim() === 'Linka:') {
-                        cell.textContent = 'Vlak:';
-                    } else if (cell.textContent.trim() === 'Linka') {
-                        cell.textContent = 'Vlak';
-                    }
-                });
+            tempDiv.querySelectorAll('tr, li').forEach(el => {
+                const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                if (txt.includes('spoj:')) el.remove();
             });
+            // TreeWalker pro bezpečný přepis pouhého textu uvnitř tabulky
+            const walker = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (node.nodeValue.includes('Linka')) {
+                    node.nodeValue = node.nodeValue.replace('Linka', 'Vlak');
+                }
+            }
         }
 
-        // 3. PREVENTIVNÍ KONTROLA: Pokud se nepodařilo jízdní řád načíst, odebereme tlačítko
-        if (timetableRaw.includes("Jízdní řád se nepodařilo načíst.") || timetableRaw.trim() === "") {
-            tempDiv.querySelectorAll('button, a, div').forEach(el => {
-                if (el.outerHTML.includes('openTimetable') || el.outerHTML.includes('loadTimetable') || el.textContent.toLowerCase().includes('jizdni rad')) {
-                    el.remove(); // Tlačítko vůbec nevyrobíme
-                }
+        // 3. SKRYTÍ MOŽNOSTI ZOBRAZIT JÍZDNÍ ŘÁD (pokud řád selhal načíst)
+        if (!timetableRaw || timetableRaw.includes("Jízdní řád se nepodařilo načíst.") || timetableRaw.trim() === "") {
+            tempDiv.querySelectorAll('[onclick*="openTimetable"], [onclick*="loadTimetable"]').forEach(el => el.remove());
+            tempDiv.querySelectorAll('button, a, .button').forEach(el => {
+                const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+                if (txt.includes('jizdni rad')) el.remove();
             });
         }
 
@@ -608,7 +600,7 @@ async function handleVehicleClick(v) {
             bar.classList.remove('hidden');
             bar.onclick = function(e) { 
                 if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
-                    // Otevřeme jízdní řád pouze tehdy, pokud tlačítko v HTML přežilo čističku
+                    // Otevře jen tehdy, pokud v HTML po čištění zbylo volání openTimetable
                     if (cleanHtml.includes('openTimetable')) {
                         openTimetable(v.id, v.delay); 
                     }
@@ -689,7 +681,6 @@ async function fetchLiveVehicles() {
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
-        // Automatické rozkliknutí po načtení z URL linku (včetně detekce otevřené tabulky)
         if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
             const vToClick = data.find(item => item.id === selectedVehicleId);
             if (vToClick) {
