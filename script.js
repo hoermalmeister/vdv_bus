@@ -438,10 +438,11 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             if (bottomRow) bottomRow.remove();
         }
         
+        // Zpoždění je vykresleno jako OK i pro 1 a 2 minuty (tzn. barva '#58d68d')
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
-                let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 0 ? '#f39c12' : '#58d68d');
+                let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
                 let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Na čas');
                 const delaySpan = document.createElement('span');
                 delaySpan.style.marginLeft = "15px";
@@ -459,7 +460,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
                         if (totalMin < 0) totalMin += 24 * 60; 
                         let newH = Math.floor(totalMin / 60) % 24, newM = totalMin % 60;
                         let newTimeStr = `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}`;
-                        let colorClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 0 ? '#f39c12' : '#58d68d');
+                        let colorClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
                         cell.innerHTML = `<s style="color:#666; font-size: 11px; margin-right: 4px;">${cell.innerText}</s><span style="color:${colorClass}">${newTimeStr}</span>`;
                     }
                 });
@@ -556,205 +557,4 @@ async function handleVehicleClick(v) {
         cleanHtml = fixCommasInHtml(cleanHtml);
 
         const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = cleanHtml;
-        removeWheelchairInfo(tempDiv);
-
-        // 1. NEKOMPROMISNÍ ODSTRANĚNÍ UNKNOWN ZPOŽDĚNÍ
-        if (v.delay === -2147483648) {
-            const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
-            let n;
-            let toRemoveDelay = [];
-            while ((n = walkerDelay.nextNode())) {
-                if (n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('zpozdeni')) {
-                    let p = n.parentElement;
-                    let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
-                    if (container && !toRemoveDelay.includes(container)) toRemoveDelay.push(container);
-                }
-            }
-            toRemoveDelay.forEach(c => c.remove());
-        }
-
-        // 2. CHIRURGICKÉ ODSTRANĚNÍ SLOVA "SPOJ:" PRO VLAKY A PŘEPIS "LINKY" NA "VLAK"
-        if (isTrain) {
-            const walkerTrain = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
-            let n;
-            let toRemoveTrain = [];
-            while ((n = walkerTrain.nextNode())) {
-                let txt = n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                
-                // Pokud text obsahuje "spoj", najdeme jeho rodičovský kontejner a smažeme ho celý
-                if (txt.includes('spoj:')) {
-                    let p = n.parentElement;
-                    let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
-                    if (container && !toRemoveTrain.includes(container)) toRemoveTrain.push(container);
-                }
-                
-                // Přepíšeme čistě textovou hodnotu Linky na Vlak
-                if (n.nodeValue.includes('Linka')) {
-                    n.nodeValue = n.nodeValue.replace('Linka', 'Vlak');
-                } else if (n.nodeValue.includes('linka')) {
-                    n.nodeValue = n.nodeValue.replace('linka', 'vlak');
-                }
-            }
-            toRemoveTrain.forEach(c => c.remove());
-        }
-
-        // 3. SPOLEHLIVÉ SKRYTÍ TLAČÍTKA JÍZDNÍHO ŘÁDU (Když řád de-facto neexistuje)
-        // Pokud stažený řád neobsahuje tabulkový řádek (<tr), považujeme ho za prázdný/neplatný
-        const hasValidTimetable = timetableRaw && timetableRaw.toLowerCase().includes('<tr');
-        if (!hasValidTimetable) {
-            tempDiv.querySelectorAll('*').forEach(el => {
-                const onclickAttr = el.getAttribute('onclick') || '';
-                const textContent = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-                
-                // Smaže cokoliv, co má v onclick "openTimetable" nebo "loadTimetable" 
-                // NEBO smaže tlačítko/odkaz, které obsahuje text "jizdni rad"
-                if (onclickAttr.includes('openTimetable') || onclickAttr.includes('loadTimetable') || ((el.tagName === 'BUTTON' || el.tagName === 'A') && textContent.includes('jizdni rad'))) {
-                    el.remove();
-                }
-            });
-        }
-
-        cleanHtml = tempDiv.innerHTML;
-
-        if (window.innerWidth <= 768) {
-            const bar = document.getElementById('mobile-bottom-bar');
-            document.getElementById('mobile-bar-content').innerHTML = cleanHtml;
-            bar.classList.remove('hidden');
-            bar.onclick = function(e) { 
-                if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
-                    // Poslední pojistka: Panel proklikne na tabulku jen tehdy, když kód tlačítka přežil čističku
-                    if (cleanHtml.includes('openTimetable')) {
-                        openTimetable(v.id, v.delay); 
-                    }
-                } 
-            };
-        } else {
-            if (currentPopup) currentPopup.remove();
-            currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(cleanHtml).addTo(map);
-        }
-    } catch(e) { console.error("Nelze načíst detail vozidla", e); }
-}
-
-// --- 6. ENGINE PRO ŽIVÁ VOZIDLA ---
-function toggleRealtimeMode(forceState = null) {
-    isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
-    const btn = document.getElementById('rt-btn');
-    
-    if (isRealtimeMode) {
-        map.setMaxZoom(19);
-        if(btn) btn.classList.add('active');
-        if(!selectedVehicleId) highlightRoute(null);
-        fetchLiveVehicles();
-        rtInterval = setInterval(fetchLiveVehicles, 10000);
-    } else {
-        map.setMaxZoom(15);
-        if (map.getZoom() > 15) map.setZoom(15);
-        if(btn) btn.classList.remove('active');
-        clearInterval(rtInterval);
-        
-        map.getSource('vehicles').setData({ type: 'FeatureCollection', features: [] });
-        map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-        
-        document.getElementById('mobile-bottom-bar').classList.add('hidden');
-        if (currentPopup) currentPopup.remove();
-        
-        selectedVehicleId = null;
-        highlightRoute(initialRoute || null); 
-    }
-    updateURL();
-}
-
-if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
-
-async function fetchLiveVehicles() {
-    if (!isRealtimeMode) return;
-    try {
-        const timestamp = new Date().getTime();
-        const response = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`);
-        const data = await response.json();
-
-        const geojson = {
-            type: 'FeatureCollection',
-            features: data.map(v => {
-                const isTrain = v.traction === 'TRAIN';
-                const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
-                
-                let delayClass = 'ok';
-                if (v.delay === -2147483648) delayClass = 'unknown';
-                else if (v.delay > 0 && v.delay <= 9) delayClass = 'warn';
-                else if (v.delay >= 10) delayClass = 'alert';
-
-                if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
-                    delayClass = 'dim'; 
-                }
-
-                const iconId = getVehicleIcon(delayClass, shortLine, isTrain);
-
-                return {
-                    type: 'Feature',
-                    geometry: { type: 'Point', coordinates: [v.lng, v.lat] },
-                    properties: {
-                        id: v.id, delay: v.delay, traction: v.traction, text: v.text, lng: v.lng, lat: v.lat,
-                        iconId: iconId
-                    }
-                };
-            })
-        };
-
-        if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
-
-        // Automatické rozkliknutí po načtení z URL linku
-        if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
-            const vToClick = data.find(item => item.id === selectedVehicleId);
-            if (vToClick) {
-                handleVehicleClick(vToClick);
-                if (isTimetableOpen) {
-                    openTimetable(vToClick.id, vToClick.delay);
-                }
-            }
-            initialLoadAutoClickDone = true;
-        }
-
-    } catch (e) { console.error("Chyba RT dat:", e); }
-}
-
-const locateBtn = document.getElementById('locate-btn');
-if(locateBtn) locateBtn.addEventListener('click', () => {
-    if ("geolocation" in navigator) {
-        navigator.geolocation.getCurrentPosition(position => {
-            map.flyTo({ center: [position.coords.longitude, position.coords.latitude], zoom: 14 });
-        });
-    }
-});
-
-// --- 7. INTELIGENTNÍ KOMPAS (SEVERKA) ---
-const compassBtn = document.createElement('div');
-compassBtn.id = 'compass-btn';
-compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
-compassBtn.style.cssText = `
-    position: absolute; right: 20px; bottom: 138px; z-index: 1000;
-    background: rgba(20, 20, 20, 0.85); backdrop-filter: blur(8px);
-    border: 1px solid rgba(255,255,255,0.15); border-radius: 50%;
-    width: 44px; height: 44px; cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    display: none; align-items: center; justify-content: center;
-    transition: opacity 0.2s ease;
-`;
-document.body.appendChild(compassBtn);
-
-compassBtn.addEventListener('click', () => {
-    map.resetNorth({ duration: 500 });
-});
-
-function updateCompass() {
-    const bearing = map.getBearing();
-    if (Math.abs(bearing) < 0.5) {
-        compassBtn.style.display = 'none';
-    } else {
-        compassBtn.style.display = 'flex';
-        compassBtn.querySelector('svg').style.transform = `rotate(${-bearing}deg)`;
-    }
-}
-map.on('rotate', updateCompass);
-map.on('move', updateCompass);
+        tempDiv.innerHTML = cleanHtml
