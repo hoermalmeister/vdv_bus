@@ -191,13 +191,14 @@ map.on('load', async () => {
             layout: {
                 'text-field': ['get', 'group'],
                 'text-font': ['Open Sans Bold'],
-                'text-size': 14,
+                'text-size': 13, 
                 'text-anchor': 'center'
             },
             paint: {
                 'text-color': '#ffffff',
                 'text-halo-color': ['get', 'color'],
-                'text-halo-width': 3
+                'text-halo-width': 3,
+                'text-halo-blur': 1 // NOVÉ: Přidá lehký antialiasing, hrany nebudou zubaté
             }
         });
 
@@ -249,8 +250,14 @@ map.on('load', async () => {
             id: 'vehicles-text',
             type: 'symbol',
             source: 'vehicles',
-            layout: { 'text-field': ['get', 'shortLabel'], 'text-font': ['Open Sans Bold'], 'text-size': 12, 'text-allow-overlap': true },
-            paint: { 'text-color': ['get', 'textColorHex'] }
+            layout: { 
+                'text-field': ['get', 'shortLabel'], 
+                'text-font': ['Open Sans Bold'], 
+                'text-size': 12
+            },
+            paint: { 
+                'text-color': ['get', 'textColorHex'] 
+            }
         });
 
         document.getElementById('loading').style.display = 'none';
