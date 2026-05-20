@@ -209,4 +209,11 @@ html, body {
     margin-bottom: 15px; 
 }
 .is-hidden { display: none !important; }
+
+#mobile-bottom-bar, 
+.maplibregl-popup-content, 
+#timetable-modal-content {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
 .has-text-centered { text-align: center !important; }
