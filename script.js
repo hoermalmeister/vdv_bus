@@ -11,13 +11,19 @@ let initialLoadAutoClickDone = false;
 let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
-if (urlParams.has('z')) startZoom = parseFloat(urlParams.get('z'));
-if (urlParams.has('y')) startLat = parseFloat(urlParams.get('y'));
-if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
-if (urlParams.has('line')) activeRouteGroups = urlParams.getAll('line'); 
-if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
-if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
-if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
+
+// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
+if (!window.location.search || window.location.search === '?') {
+    isRealtimeMode = true;
+} else {
+    if (urlParams.has('z')) startZoom = parseFloat(urlParams.get('z'));
+    if (urlParams.has('y')) startLat = parseFloat(urlParams.get('y'));
+    if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
+    if (urlParams.has('line')) activeRouteGroups = urlParams.getAll('line'); 
+    if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
+    if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
+    if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
+}
 
 let geojsonData = null;
 let allStops = [];
@@ -290,7 +296,6 @@ map.on('load', async () => {
         console.warn("spoje.json nenalezen", e);
     }
 
-    // Načítání železničních stanic
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
         if (zRes.ok) {
@@ -347,7 +352,6 @@ map.on('load', async () => {
 
         map.addSource('trasy', { type: 'geojson', data: geojsonData });
 
-        // NEROZBITNÝ FILTR PRO LINKY: Vykreslí se cokoliv, co není Point!
         map.addLayer({
             id: 'lines-layer',
             type: 'line',
@@ -429,7 +433,6 @@ map.on('load', async () => {
 
 // --- 4. INTERAKCE A FOCUS ---
 function highlightRoute(groups) {
-    // Sjednotí vstup na pole stringů
     activeRouteGroups = Array.isArray(groups) ? groups.map(String) : (groups ? [String(groups)] : []);
     
     if (map.getLayer('lines-layer')) {
@@ -438,18 +441,17 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
         } else {
-            // NEROZBITNÝ dynamický MATCH expression (nezávislý na verzi MapLibre/Mapbox)
             const matchOpacity = ['match', ['to-string', ['get', 'group']]];
             activeRouteGroups.forEach(g => matchOpacity.push(String(g), 1));
-            matchOpacity.push(0.10); // Fallback opacity
+            matchOpacity.push(0.10); 
             
             const matchWidth = ['match', ['to-string', ['get', 'group']]];
             activeRouteGroups.forEach(g => matchWidth.push(String(g), 6));
-            matchWidth.push(3); // Fallback width
+            matchWidth.push(3); 
             
             const matchBadge = ['match', ['to-string', ['get', 'group']]];
             activeRouteGroups.forEach(g => matchBadge.push(String(g), 1));
-            matchBadge.push(0); // Fallback badge opacity
+            matchBadge.push(0); 
             
             map.setPaintProperty('lines-layer', 'line-opacity', matchOpacity);
             map.setPaintProperty('lines-layer', 'line-width', matchWidth);
@@ -464,14 +466,22 @@ map.on('click', (e) => {
     const lineFeatures = map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
 
     if (!vFeatures.length && !lineFeatures.length) {
-        if (activeRouteGroups.length > 0 && !selectedVehicleId) highlightRoute([]);
-        if (selectedVehicleId !== null) {
-            selectedVehicleId = null;
-            map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-            document.getElementById('mobile-bottom-bar').classList.add('hidden');
-            if (currentPopup) currentPopup.remove();
-            if (isRealtimeMode) highlightRoute([]);
-            updateURL();
+        const hadLine = activeRouteGroups.length > 0;
+        const hadVehicle = selectedVehicleId !== null;
+
+        if (hadLine || hadVehicle) {
+            if (hadLine) {
+                // Pokud vyklikneme a je aktivní filtr linky, chceme nejen zrušit filtr, ale i celý RT (dle zadání uživatele)
+                if (isRealtimeMode) toggleRealtimeMode(false);
+                else highlightRoute([]);
+            } else {
+                // Pokud nebyla vybraná žádná linka (jenom volná mapa s vozidly), tak zavřeme detail vozu, ale RT necháme žít
+                selectedVehicleId = null;
+                map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+                document.getElementById('mobile-bottom-bar').classList.add('hidden');
+                if (currentPopup) currentPopup.remove();
+                updateURL();
+            }
         }
     } else if (vFeatures.length) {
         handleVehicleClick(vFeatures[0].properties);
@@ -480,7 +490,9 @@ map.on('click', (e) => {
         const isOnlySelected = activeRouteGroups.length === 1 && activeRouteGroups[0] === group;
         
         if (isOnlySelected) {
-            highlightRoute([]); 
+            // Opětovné kliknutí na už vybranou linku
+            if (isRealtimeMode) toggleRealtimeMode(false);
+            else highlightRoute([]);
         } else {
             highlightRoute([group]); 
             if (!isRealtimeMode) {
@@ -563,7 +575,6 @@ let currentPopup = null;
 async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
-    highlightRoute([]); // Odznačí okolní trasy a ukáže jen tuto
 
     const isTrain = v.traction === 'TRAIN';
     const routeToHighlight = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3); 
@@ -634,7 +645,6 @@ async function handleVehicleClick(v) {
                 }
             }
         } else if (isTrain) {
-            // Vykreslení trasy vlaku přes zeleznice.txt
             const parser = new DOMParser();
             const doc = parser.parseFromString(timetableRaw, 'text/html');
             const stopCells = doc.querySelectorAll('tbody tr td:first-child');
@@ -752,7 +762,7 @@ function toggleRealtimeMode(forceState = null) {
         if (currentPopup) currentPopup.remove();
         
         selectedVehicleId = null;
-        highlightRoute(activeRouteGroups); 
+        highlightRoute([]); // IMPORTANT: Tento řádek maže filtry při vypnutí RT!
     }
     updateURL();
 }
@@ -768,7 +778,6 @@ async function fetchLiveVehicles() {
 
         const geojson = {
             type: 'FeatureCollection',
-            // FILTRACE VOZIDEL DLE VYBRANÝCH LINEK
             features: data.filter(v => {
                 if (activeRouteGroups.length > 0) {
                     const isTrain = v.traction === 'TRAIN';
@@ -804,7 +813,6 @@ async function fetchLiveVehicles() {
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
-        // Rozklikne se automaticky při otevření přes URL
         if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
             const vToClick = data.find(item => item.id === selectedVehicleId);
             if (vToClick) {
