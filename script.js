@@ -12,6 +12,7 @@ let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
+// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -676,19 +677,19 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // VLOŽENÍ SMĚRU (Cílové zastávky) DO DETAILU VOZIDLA
-        if (v.finalStopName && v.finalStopName.trim() !== '') {
+        // VLOŽENÍ SMĚRU (Cílové zastávky) S MEZERAMI ZA ČÁRKAMI
+        if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
+            let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); // Správné přidání mezer za čárky
             let targetTr = null;
             tempDiv.querySelectorAll('tr').forEach(tr => {
                 const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-                // Zastavíme se na posledním výskytu linky nebo spoje
                 if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj')) {
                     targetTr = tr;
                 }
             });
             if (targetTr) {
                 const newTr = document.createElement('tr');
-                newTr.innerHTML = `<th>Směr:</th><td><strong>${v.finalStopName}</strong></td>`;
+                newTr.innerHTML = `<th>Směr:</th><td><strong>${formattedStopName}</strong></td>`;
                 targetTr.after(newTr);
             }
         }
@@ -808,8 +809,8 @@ async function fetchLiveVehicles() {
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
-                // SKRYTÍ SPOJŮ BEZ JÍZDNÍHO ŘÁDU (Nemají vyplněnou konečnou zastávku)
-                if (!v.finalStopName || v.finalStopName.trim() === '') {
+                // SKRYTÍ MANIPULAČNÍCH JÍZD (Nemají platný cíl, jeví se jako "-1 N/a")
+                if (v.finalStopName && v.finalStopName.includes('-1 N/a')) {
                     return false;
                 }
                 
