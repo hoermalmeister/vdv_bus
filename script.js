@@ -6,14 +6,17 @@ let selectedVehicleId = null;
 let isTimetableOpen = false;
 let rtInterval = null;
 let initialLoadAutoClickDone = false; 
-let isFetchingVehicles = false; // Zámek proti zasekávání požadavků
+let isFetchingVehicles = false; 
 
-// Pole pro uložení jedné nebo vícero linek z URL
+// Globální mezipaměť pro úsporu požadavků
+let cachedVehicleId = null;
+let cachedInfoRaw = null;
+let cachedTimetableRaw = null;
+
 let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
-// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -31,7 +34,6 @@ let allStops = [];
 let tripShapes = {}; 
 let trainStopsMap = {}; 
 
-// --- 0. WIKIDATA API PRO UIC KÓDY STANIC ---
 const uicCache = {};
 async function getStationNameByUIC(uic) {
     if (uicCache[uic]) return uicCache[uic];
@@ -51,7 +53,6 @@ async function getStationNameByUIC(uic) {
     return uic;
 }
 
-// --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
 const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = new maplibregl.Map({
     container: 'map',
@@ -96,9 +97,7 @@ function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
         if (el && el.textContent) {
             const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            if (txt.includes('bezbari')) {
-                el.remove();
-            }
+            if (txt.includes('bezbari')) el.remove();
         }
     });
 }
@@ -205,7 +204,6 @@ function updateURL() {
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
 
-// --- 2. VYKRESLOVÁNÍ GRAFIKY ROVNOU DO PAMĚTI KARTY ---
 const PIXEL_RATIO = 2; 
 
 function getBadgeIcon(group, color) {
@@ -312,14 +310,11 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     return id;
 }
 
-// --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) {
-        console.warn("spoje.json nenalezen", e);
-    }
+    } catch (e) { console.warn("spoje.json nenalezen", e); }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -474,7 +469,6 @@ map.on('load', async () => {
     }
 });
 
-// --- 4. INTERAKCE A FOCUS ---
 function highlightRoute(groups) {
     activeRouteGroups = Array.isArray(groups) ? groups.map(String) : (groups ? [String(groups)] : []);
     
@@ -542,16 +536,29 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE) ---
 window.openTimetable = async function(vehicleId, delayInMinutes) {
-    document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
-    document.getElementById('timetable-modal').classList.remove('hidden');
+    const modalContent = document.getElementById('timetable-modal-content');
+    const modal = document.getElementById('timetable-modal');
+
+    if (modal.classList.contains('hidden')) {
+        modalContent.innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
+        modal.classList.remove('hidden');
+    }
     
     isTimetableOpen = true;
     updateURL();
 
     try {
-        let rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
+        let rawHtml;
+        if (cachedVehicleId === vehicleId && cachedTimetableRaw) {
+            rawHtml = cachedTimetableRaw;
+        } else {
+            rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
+            cachedTimetableRaw = rawHtml;
+            cachedVehicleId = vehicleId;
+        }
+
         let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
         cleanHtml = fixCommasInHtml(cleanHtml);
         
@@ -566,6 +573,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             if (bottomRow) bottomRow.remove();
         }
         
+        // Převedení zpoždění do tabulky (bez dotazů na server)
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
@@ -594,14 +602,19 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             }
         }
 
+        // Zámek zalamování prvního sloupce 
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
             }
         });
 
-        document.getElementById('timetable-modal-content').innerHTML = tempDiv.innerHTML;
-    } catch(e) { document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
+        // Udržení aktuální pozice scrollu, aby okno neskákalo
+        const currentScroll = modalContent.scrollTop;
+        modalContent.innerHTML = tempDiv.innerHTML;
+        modalContent.scrollTop = currentScroll;
+
+    } catch(e) { modalContent.innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
 window.closeTimetable = function() { 
@@ -615,7 +628,6 @@ let currentPopup = null;
 async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
-    highlightRoute([]); 
 
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
@@ -628,88 +640,98 @@ async function handleVehicleClick(v) {
                      ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
 
     try {
-        const [infoRaw, timetableRaw] = await Promise.all([
-            fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`),
-            fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${v.id}&currentStopId=0`)
-        ]);
+        let infoRaw, timetableRaw;
+        if (cachedVehicleId === v.id && cachedInfoRaw && cachedTimetableRaw) {
+            infoRaw = cachedInfoRaw;
+            timetableRaw = cachedTimetableRaw;
+        } else {
+            const [iRes, tRes] = await Promise.all([
+                fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`),
+                fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${v.id}&currentStopId=0`)
+            ]);
+            infoRaw = iRes;
+            timetableRaw = tRes;
+            cachedInfoRaw = infoRaw;
+            cachedTimetableRaw = timetableRaw;
+            cachedVehicleId = v.id;
+            
+            // Rekalkulace trasy jen při stažení nových dat
+            map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+            if (!isNonVDV) {
+                if (!isTrain && geojsonData) {
+                    let multiLineCoords = [];
+                    geojsonData.features.forEach(f => {
+                        if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) {
+                            if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
+                            else multiLineCoords.push(...f.geometry.coordinates);
+                        }
+                    });
 
-        map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-        
-        // Vykreslení trasy POUZE pro integrované spoje
-        if (!isNonVDV) {
-            if (!isTrain && geojsonData) {
-                let multiLineCoords = [];
-                geojsonData.features.forEach(f => {
-                    if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) {
-                        if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
-                        else multiLineCoords.push(...f.geometry.coordinates);
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(timetableRaw, 'text/html');
+                    const labelSpan = doc.getElementById('currentLineRouteLabel');
+                    
+                    let linka = "", spoj = "";
+                    if (labelSpan) {
+                        const parts = labelSpan.innerText.split('/');
+                        if(parts.length >= 1) linka = parts[0].trim();
+                        if(parts.length >= 2) spoj = parts[1].trim();
                     }
-                });
 
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(timetableRaw, 'text/html');
-                const labelSpan = doc.getElementById('currentLineRouteLabel');
-                
-                let linka = "", spoj = "";
-                if (labelSpan) {
-                    const parts = labelSpan.innerText.split('/');
-                    if(parts.length >= 1) linka = parts[0].trim();
-                    if(parts.length >= 2) spoj = parts[1].trim();
-                }
+                    let firstTime = "";
+                    const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
+                    if (firstTimeCell) {
+                        const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/);
+                        if (timeMatch) firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; 
+                    }
 
-                let firstTime = "";
-                const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
-                if (firstTimeCell) {
-                    const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/);
-                    if (timeMatch) firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; 
-                }
+                    const vdvKey = `${linka}/${spoj}`;
+                    const pidKey = `${linka}/PID${firstTime}`;
 
-                const vdvKey = `${linka}/${spoj}`;
-                const pidKey = `${linka}/PID${firstTime}`;
+                    const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
 
-                const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
+                    if (rawCoords && rawCoords.length > 1) {
+                        const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } };
+                        map.getSource('trip-route').setData(geoJsonLine);
+                    } else {
+                        const stopCells = doc.querySelectorAll('tbody tr td:first-child');
+                        let stopCoords = [];
+                        let previousCoord = null;
 
-                if (rawCoords && rawCoords.length > 1) {
-                    const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } };
-                    map.getSource('trip-route').setData(geoJsonLine);
-                } else {
+                        stopCells.forEach(cell => {
+                            const normName = normalizeStopName(cell.innerText);
+                            const bestCoord = findBestStop(normName, multiLineCoords, previousCoord);
+                            if (bestCoord) { stopCoords.push(bestCoord); previousCoord = bestCoord; }
+                        });
+
+                        if (stopCoords.length > 1) {
+                            let finalTripCoords = [stopCoords[0]];
+                            for (let i = 0; i < stopCoords.length - 1; i++) {
+                                let A = stopCoords[i], B = stopCoords[i+1];
+                                let roadPath = getPathBetweenStops(A, B, multiLineCoords);
+                                if (roadPath) finalTripCoords.push(...roadPath);
+                                else finalTripCoords.push(B); 
+                            }
+                            map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: finalTripCoords }});
+                        }
+                    }
+                } else if (isTrain) {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(timetableRaw, 'text/html');
                     const stopCells = doc.querySelectorAll('tbody tr td:first-child');
                     let stopCoords = [];
-                    let previousCoord = null;
 
                     stopCells.forEach(cell => {
-                        const normName = normalizeStopName(cell.innerText);
-                        const bestCoord = findBestStop(normName, multiLineCoords, previousCoord);
-                        if (bestCoord) { stopCoords.push(bestCoord); previousCoord = bestCoord; }
+                        let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim();
+                        if (trainStopsMap[rawName]) {
+                            stopCoords.push(trainStopsMap[rawName]);
+                        }
                     });
 
                     if (stopCoords.length > 1) {
-                        let finalTripCoords = [stopCoords[0]];
-                        for (let i = 0; i < stopCoords.length - 1; i++) {
-                            let A = stopCoords[i], B = stopCoords[i+1];
-                            let roadPath = getPathBetweenStops(A, B, multiLineCoords);
-                            if (roadPath) finalTripCoords.push(...roadPath);
-                            else finalTripCoords.push(B); 
-                        }
-                        map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: finalTripCoords }});
+                        const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } };
+                        map.getSource('trip-route').setData(geoJsonLine);
                     }
-                }
-            } else if (isTrain) {
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(timetableRaw, 'text/html');
-                const stopCells = doc.querySelectorAll('tbody tr td:first-child');
-                let stopCoords = [];
-
-                stopCells.forEach(cell => {
-                    let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim();
-                    if (trainStopsMap[rawName]) {
-                        stopCoords.push(trainStopsMap[rawName]);
-                    }
-                });
-
-                if (stopCoords.length > 1) {
-                    const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } };
-                    map.getSource('trip-route').setData(geoJsonLine);
                 }
             }
         }
@@ -721,6 +743,20 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
+        // Odstraníme statické zpoždění od serveru
+        const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
+        let n;
+        let toRemoveDelay = [];
+        while ((n = walkerDelay.nextNode())) {
+            if (n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('zpozdeni')) {
+                let p = n.parentElement;
+                let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
+                if (container && !toRemoveDelay.includes(container)) toRemoveDelay.push(container);
+            }
+        }
+        toRemoveDelay.forEach(c => c.remove());
+
+        // --- VLOŽENÍ SMĚRU VČETNĚ DOTAZU NA WIKIDATA ---
         if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
@@ -745,18 +781,22 @@ async function handleVehicleClick(v) {
             }
         }
 
-        if (v.delay === -2147483648) {
-            const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
-            let n;
-            let toRemoveDelay = [];
-            while ((n = walkerDelay.nextNode())) {
-                if (n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('zpozdeni')) {
-                    let p = n.parentElement;
-                    let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
-                    if (container && !toRemoveDelay.includes(container)) toRemoveDelay.push(container);
+        // VLOŽENÍ NOVÉHO DYNAMICKÉHO ZPOŽDĚNÍ Z GETPOINTS (Pokud existuje)
+        if (v.delay !== -2147483648) {
+            let targetTr = null;
+            tempDiv.querySelectorAll('tr').forEach(tr => {
+                const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+                if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj') || txt.includes('smer')) {
+                    targetTr = tr;
                 }
+            });
+            if (targetTr) {
+                let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
+                let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
+                const newTr = document.createElement('tr');
+                newTr.innerHTML = `<th>Zpoždění:</th><td><b style="color:${delayClass}">${delayText}</b></td>`;
+                targetTr.after(newTr);
             }
-            toRemoveDelay.forEach(c => c.remove());
         }
 
         if (isTrain) {
@@ -793,13 +833,13 @@ async function handleVehicleClick(v) {
             });
         }
 
+        // Zabránění zalamování prvního sloupce v Detailu vozidla
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
             }
         });
 
-        // Přidání varování pro neintegrované spoje
         if (isNonVDV) {
             const table = tempDiv.querySelector('table') || tempDiv.querySelector('tbody');
             if (table) {
@@ -833,7 +873,13 @@ async function handleVehicleClick(v) {
 
         if (window.innerWidth <= 768) {
             const bar = document.getElementById('mobile-bottom-bar');
-            document.getElementById('mobile-bar-content').innerHTML = cleanHtml;
+            const barContent = document.getElementById('mobile-bar-content');
+            
+            // Zachování scrollu na mobilu při plynulém updatu
+            const currentScroll = barContent.scrollTop;
+            barContent.innerHTML = cleanHtml;
+            barContent.scrollTop = currentScroll;
+            
             bar.classList.remove('hidden');
             bar.onclick = function(e) { 
                 if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
@@ -843,8 +889,13 @@ async function handleVehicleClick(v) {
                 } 
             };
         } else {
-            if (currentPopup) currentPopup.remove();
-            currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(cleanHtml).addTo(map);
+            // Bezproblikový update popupu přes setHTML s existující instancí
+            if (currentPopup && currentPopup.isOpen()) {
+                currentPopup.setLngLat([v.lng, v.lat]).setHTML(cleanHtml);
+            } else {
+                if (currentPopup) currentPopup.remove();
+                currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(cleanHtml).addTo(map);
+            }
         }
     } catch(e) { console.error("Nelze načíst detail vozidla", e); }
 }
@@ -859,7 +910,7 @@ function toggleRealtimeMode(forceState = null) {
         if(btn) btn.classList.add('active');
         highlightRoute(activeRouteGroups);
         
-        clearInterval(rtInterval); // Bezpečnostní pročištění
+        clearInterval(rtInterval);
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
@@ -894,7 +945,6 @@ async function fetchLiveVehicles() {
         const geojson = {
             type: 'FeatureCollection',
             features: data.filter(v => {
-                // KRITICKÁ POJISTKA - Odfiltrování vozů bez souřadnic (zabrání spadnutí grafické karty)
                 if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return false;
 
                 const isTrain = v.traction === 'TRAIN';
@@ -905,7 +955,6 @@ async function fetchLiveVehicles() {
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
-                // SKRYTÍ POUZE SPOJŮ, KTERÉ MAJÍ UNKNOWN ZPOŽDĚNÍ A ZÁROVEŇ N/a VE SMĚRU
                 const isUnknownDelay = v.delay === -2147483648;
                 const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
                 
@@ -919,7 +968,6 @@ async function fetchLiveVehicles() {
                 const vTextStr = String(v.text || '');
                 const shortLine = vTextStr.replace(/\D/g, '').slice(-3) || "??";
                 
-                // Zjištění komerční / nonVDV linky pro vykreslení modrého okraje vozidla
                 const isNonVDV = vTextStr.startsWith('620') || 
                                  vTextStr.startsWith('35500') || 
                                  vTextStr.startsWith('84500') || 
@@ -949,21 +997,25 @@ async function fetchLiveVehicles() {
 
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
-        if (!initialLoadAutoClickDone && selectedVehicleId !== null) {
+        if (selectedVehicleId !== null) {
             const vToClick = data.find(item => item.id === selectedVehicleId);
             if (vToClick) {
-                handleVehicleClick(vToClick);
-                if (isTimetableOpen) {
-                    openTimetable(vToClick.id, vToClick.delay);
+                if (!initialLoadAutoClickDone) {
+                    handleVehicleClick(vToClick);
+                    if (isTimetableOpen) openTimetable(vToClick.id, vToClick.delay);
+                    initialLoadAutoClickDone = true;
+                } else {
+                    // Plynulý (bezešvý) update otevřených informací a pozice
+                    handleVehicleClick(vToClick);
+                    if (isTimetableOpen) openTimetable(vToClick.id, vToClick.delay);
                 }
             }
-            initialLoadAutoClickDone = true;
         }
 
     } catch (e) { 
         console.error("Chyba RT dat:", e); 
     } finally {
-        isFetchingVehicles = false; // Odemčení zámku i po chybě sítě
+        isFetchingVehicles = false; 
     }
 }
 
