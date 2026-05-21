@@ -706,13 +706,15 @@ async function handleVehicleClick(v) {
         removeWheelchairInfo(tempDiv);
 
         // --- VLOŽENÍ SMĚRU VČETNĚ DOTAZU NA WIKIDATA ---
-        if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
+        if (v.finalStopName && v.finalStopName.trim() !== '') {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
             // Zachycení UIC kódu (např. 5475860 N/a)
-            let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i);
-            if (uicMatch) {
-                formattedStopName = await getStationNameByUIC(uicMatch[1]);
+            if (isTrain) {
+                let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i);
+                if (uicMatch) {
+                    formattedStopName = await getStationNameByUIC(uicMatch[1]);
+                }
             }
 
             let targetTr = null;
@@ -845,14 +847,15 @@ async function fetchLiveVehicles() {
         const geojson = {
             type: 'FeatureCollection',
             features: data.filter(v => {
+                const isTrain = v.traction === 'TRAIN';
+                
                 if (activeRouteGroups.length > 0) {
-                    const isTrain = v.traction === 'TRAIN';
                     const routeOfVehicle = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3);
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
-                // SKRYTÍ VOZIDEL BEZ JÍZDNÍHO ŘÁDU (zpoždění je plně neznámé)
-                if (v.delay === -2147483648) {
+                // SKRYTÍ AUTOBUSŮ A JINÝCH VOZIDEL (KROMĚ VLAKŮ) S "N/a" VE SMĚRU
+                if (!isTrain && v.finalStopName && /n\/a/i.test(v.finalStopName)) {
                     return false;
                 }
                 
@@ -862,7 +865,7 @@ async function fetchLiveVehicles() {
                 const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
                 
                 let delayClass = 'ok';
-                if (v.delay === -2147483648) delayClass = 'unknown'; // Neznámá se už sice nevykreslí, ale necháváme pro sychr
+                if (v.delay === -2147483648) delayClass = 'unknown';
                 else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
                 else if (v.delay >= 10) delayClass = 'alert';
 
