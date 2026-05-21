@@ -186,7 +186,7 @@ function getPathBetweenStops(coordA, coordB, multiLineCoords) {
 
 function updateURL() {
     const center = map.getCenter();
-    const params = new URLSearchParams();
+    const params = newSearchParams();
     params.set('x', center.lng.toFixed(4));
     params.set('y', center.lat.toFixed(4));
     params.set('z', map.getZoom().toFixed(1));
@@ -252,8 +252,9 @@ function getBadgeIcon(group, color) {
     return id;
 }
 
-function getVehicleIcon(delayClass, label, isTrain) {
-    const id = `v-${delayClass}-${label}`;
+// Rozšířeno o možnost zobrazení "modrého" ohraničení pro komerční (nonVDV) linky
+function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
+    const id = `v-${delayClass}-${label}-${isTrain ? 't' : 'b'}-${isNonVDV ? 'nvdv' : 'vdv'}`;
     if (map.hasImage(id)) return id;
 
     const size = 30;
@@ -263,11 +264,20 @@ function getVehicleIcon(delayClass, label, isTrain) {
     const ctx = canvas.getContext('2d');
     ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
 
-    let bgColor = '#58d68d'; let textColor = '#111'; let borderColor = '#fff';
+    let bgColor = '#58d68d'; 
+    let textColor = '#111'; 
+    
+    // Zde nastavíme standardní bílý rámeček pro integraci, nebo modrý pro komerční spoje
+    let borderColor = isNonVDV ? '#3498db' : '#fff'; 
+    
     if (delayClass === 'unknown') { bgColor = '#7f8c8d'; textColor = '#fff'; }
     else if (delayClass === 'warn') bgColor = '#f39c12';
     else if (delayClass === 'alert') { bgColor = '#e74c3c'; textColor = '#fff'; }
-    else if (delayClass === 'dim') { bgColor = '#1a2530'; borderColor = '#2c3e50'; textColor = '#5dade2'; }
+    else if (delayClass === 'dim') { 
+        bgColor = '#1a2530'; 
+        borderColor = isNonVDV ? '#2980b9' : '#2c3e50'; // Ztmavená modrá vs ztmavená šedá
+        textColor = '#5dade2'; 
+    }
 
     ctx.beginPath();
     if (isTrain) {
@@ -616,8 +626,11 @@ async function handleVehicleClick(v) {
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3); 
     
-    // Identifikace komerčních / ne-VDV spojů
-    const nonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500');
+    // Nekompromisní detekce neintegrovaných (komerčních) spojů VDV dle zadaných pravidel
+    const isNonVDV = vTextStr.startsWith('620') || 
+                     vTextStr.startsWith('35500') || 
+                     vTextStr.startsWith('84500') || 
+                     ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
 
     try {
         const [infoRaw, timetableRaw] = await Promise.all([
@@ -627,8 +640,8 @@ async function handleVehicleClick(v) {
 
         map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
-        // Vykreslení trasy pouze pro VDV spoje
-        if (!nonVDV) {
+        // Vykreslování trasy POUZE pro integrované spoje
+        if (!isNonVDV) {
             if (!isTrain && geojsonData) {
                 let multiLineCoords = [];
                 geojsonData.features.forEach(f => {
@@ -714,7 +727,7 @@ async function handleVehicleClick(v) {
         removeWheelchairInfo(tempDiv);
 
         // --- VLOŽENÍ SMĚRU VČETNĚ DOTAZU NA WIKIDATA ---
-        if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
+        if (v.finalStopName && v.finalStopName.trim() !== '') {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
             if (isTrain) {
@@ -794,7 +807,7 @@ async function handleVehicleClick(v) {
         });
 
         // PŘIDÁNÍ VAROVÁNÍ PRO NEINTEGROVANÉ (KOMERČNÍ) SPOJE
-        if (nonVDV) {
+        if (isNonVDV) {
             const table = tempDiv.querySelector('table') || tempDiv.querySelector('tbody');
             if (table) {
                 const tr = document.createElement('tr');
@@ -883,31 +896,45 @@ async function fetchLiveVehicles() {
         const geojson = {
             type: 'FeatureCollection',
             features: data.filter(v => {
+                const isTrain = v.traction === 'TRAIN';
+                
                 if (activeRouteGroups.length > 0) {
-                    const isTrain = v.traction === 'TRAIN';
                     const routeOfVehicle = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3);
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
-                // PŮVODNÍ SPOLUHLIVÝ FILTR (zpoždění je plně neznámé)
-                if (v.delay === -2147483648) {
+                // SKRYTÍ POUZE SPOJŮ, KTERÉ MAJÍ UNKNOWN ZPOŽDĚNÍ A ZÁROVEŇ N/a VE SMĚRU
+                const isUnknownDelay = v.delay === -2147483648;
+                const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
+                
+                // Vlaků se tento filtr netýká (mají často N/a kvůli UIC kódu a my je chceme pro Wikidata)
+                if (isUnknownDelay && hasNaDirection && !isTrain) {
                     return false;
                 }
                 
                 return true;
             }).map(v => {
                 const isTrain = v.traction === 'TRAIN';
-                const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
+                const vTextStr = String(v.text || '');
+                const shortLine = vTextStr.replace(/\D/g, '').slice(-3) || "??";
+                
+                // Zjištění komerční / nonVDV linky pro vykreslení modrého okraje vozidla
+                const isNonVDV = vTextStr.startsWith('620') || 
+                                 vTextStr.startsWith('35500') || 
+                                 vTextStr.startsWith('84500') || 
+                                 ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
                 
                 let delayClass = 'ok';
-                if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
+                if (v.delay === -2147483648) delayClass = 'unknown';
+                else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
                 else if (v.delay >= 10) delayClass = 'alert';
 
                 if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
                     delayClass = 'dim'; 
                 }
 
-                const iconId = getVehicleIcon(delayClass, shortLine, isTrain);
+                // Generování ikony vozidla s případným modrým lemováním
+                const iconId = getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV);
 
                 return {
                     type: 'Feature',
