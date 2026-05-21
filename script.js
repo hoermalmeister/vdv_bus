@@ -12,7 +12,6 @@ let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
-// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -332,7 +331,6 @@ map.on('load', async () => {
         }
     } catch(e) { console.warn("zeleznice.txt pro vlaky nenalezeno", e); }
 
-    // NAČTENÍ BÍLÝCH TRAS ŽELEZNICE
     try {
         const resZelGeo = await fetch('zeleznice.geojson?t=' + new Date().getTime());
         if (resZelGeo.ok) {
@@ -483,7 +481,6 @@ function highlightRoute(groups) {
 
 map.on('click', (e) => {
     const vFeatures = map.queryRenderedFeatures(e.point, { layers: ['vehicles-layer'] });
-    // Zásadní změna: Pokud je zapnuto RT (živá mapa), ignorujeme kliky na silnice
     const lineFeatures = isRealtimeMode ? [] : map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
 
     if (!vFeatures.length && !lineFeatures.length) {
@@ -492,11 +489,9 @@ map.on('click', (e) => {
 
         if (hadLine || hadVehicle) {
             if (hadLine) {
-                // Pokud vyklikneme a je aktivní filtr linky, zrušíme všechno a vypneme RT
                 if (isRealtimeMode) toggleRealtimeMode(false);
                 else highlightRoute([]);
             } else {
-                // Pokud nebyla vybraná linka (jenom velká živá mapa), vypneme pouze detail autobusu
                 selectedVehicleId = null;
                 map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
                 document.getElementById('mobile-bottom-bar').classList.add('hidden');
@@ -507,14 +502,12 @@ map.on('click', (e) => {
     } else if (vFeatures.length) {
         handleVehicleClick(vFeatures[0].properties);
     } else if (lineFeatures.length) {
-        // Sem se kód dostane, jen pokud JSME v mapě linek (nikoliv v RT módu)
         const group = String(lineFeatures[0].properties.group);
         highlightRoute([group]); 
         toggleRealtimeMode(true); 
     }
 });
 
-// Kurzorové efekty - nad silnicí se objeví ručička jen když JSME ve statické mapě linek
 map.on('mouseenter', 'vehicles-layer', () => map.getCanvas().style.cursor = 'pointer');
 map.on('mouseleave', 'vehicles-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'lines-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
@@ -683,6 +676,23 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
+        // VLOŽENÍ SMĚRU (Cílové zastávky) DO DETAILU VOZIDLA
+        if (v.finalStopName && v.finalStopName.trim() !== '') {
+            let targetTr = null;
+            tempDiv.querySelectorAll('tr').forEach(tr => {
+                const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+                // Zastavíme se na posledním výskytu linky nebo spoje
+                if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj')) {
+                    targetTr = tr;
+                }
+            });
+            if (targetTr) {
+                const newTr = document.createElement('tr');
+                newTr.innerHTML = `<th>Směr:</th><td><strong>${v.finalStopName}</strong></td>`;
+                targetTr.after(newTr);
+            }
+        }
+
         if (v.delay === -2147483648) {
             const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
             let n;
@@ -795,8 +805,14 @@ async function fetchLiveVehicles() {
                 if (activeRouteGroups.length > 0) {
                     const isTrain = v.traction === 'TRAIN';
                     const routeOfVehicle = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3);
-                    return activeRouteGroups.includes(routeOfVehicle);
+                    if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
+                
+                // SKRYTÍ SPOJŮ BEZ JÍZDNÍHO ŘÁDU (Nemají vyplněnou konečnou zastávku)
+                if (!v.finalStopName || v.finalStopName.trim() === '') {
+                    return false;
+                }
+                
                 return true;
             }).map(v => {
                 const isTrain = v.traction === 'TRAIN';
@@ -818,7 +834,7 @@ async function fetchLiveVehicles() {
                     geometry: { type: 'Point', coordinates: [v.lng, v.lat] },
                     properties: {
                         id: v.id, delay: v.delay, traction: v.traction, text: v.text, lng: v.lng, lat: v.lat,
-                        iconId: iconId
+                        iconId: iconId, finalStopName: v.finalStopName || ""
                     }
                 };
             })
