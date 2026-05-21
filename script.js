@@ -8,15 +8,12 @@ let rtInterval = null;
 let initialLoadAutoClickDone = false; 
 let isFetchingVehicles = false; 
 
-// Globální mezipaměť pro úsporu požadavků
-let cachedVehicleId = null;
-let cachedInfoRaw = null;
-let cachedTimetableRaw = null;
-
+// Pole pro uložení jedné nebo vícero linek z URL
 let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
+// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -34,6 +31,13 @@ let allStops = [];
 let tripShapes = {}; 
 let trainStopsMap = {}; 
 
+// --- POMOCNÁ FUNKCE: Odstranění nul z čísel linek (042 -> 42) ---
+function getShortLine(text) {
+    const s = String(text || '').replace(/\D/g, '').slice(-3);
+    return s ? parseInt(s, 10).toString() : "??";
+}
+
+// --- 0. WIKIDATA API PRO UIC KÓDY STANIC ---
 const uicCache = {};
 async function getStationNameByUIC(uic) {
     if (uicCache[uic]) return uicCache[uic];
@@ -53,6 +57,7 @@ async function getStationNameByUIC(uic) {
     return uic;
 }
 
+// --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
 const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = new maplibregl.Map({
     container: 'map',
@@ -204,6 +209,7 @@ function updateURL() {
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
 
+// --- 2. VYKRESLOVÁNÍ GRAFIKY ROVNOU DO PAMĚTI KARTY ---
 const PIXEL_RATIO = 2; 
 
 function getBadgeIcon(group, color) {
@@ -310,11 +316,15 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     return id;
 }
 
+// --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
+    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) { console.warn("spoje.json nenalezen", e); }
+    } catch (e) {
+        console.warn("spoje.json nenalezen", e);
+    }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -358,6 +368,7 @@ map.on('load', async () => {
         if (resZelGeo.ok) {
             const zelGeoData = await resZelGeo.json();
             map.addSource('zeleznice-trasy', { type: 'geojson', data: zelGeoData });
+            // Železnice vykreslena plnou barvou, žádné násobení opacit se nekoná
             map.addLayer({
                 id: 'zeleznice-layer',
                 type: 'line',
@@ -365,7 +376,7 @@ map.on('load', async () => {
                 paint: {
                     'line-color': '#ffffff',
                     'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2, 15, 5],
-                    'line-opacity': 0.8
+                    'line-opacity': 1 
                 }
             }); 
         }
@@ -384,6 +395,8 @@ map.on('load', async () => {
                 });
             }
             if (f.geometry.type === 'Point' && f.properties.type === 'badge') {
+                // Převod uloženého čísla skupiny na čistý formát bez nul
+                f.properties.group = getShortLine(f.properties.group);
                 f.properties.iconId = getBadgeIcon(f.properties.group, f.properties.color);
             }
         });
@@ -469,6 +482,7 @@ map.on('load', async () => {
     }
 });
 
+// --- 4. INTERAKCE A FOCUS ---
 function highlightRoute(groups) {
     activeRouteGroups = Array.isArray(groups) ? groups.map(String) : (groups ? [String(groups)] : []);
     
@@ -477,7 +491,7 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-opacity', isRealtimeMode ? 0.10 : 0.9);
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
-            if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-opacity', isRealtimeMode ? 0.10 : 0.8);
+            if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-color', isRealtimeMode ? '#444444' : '#ffffff');
         } else {
             const matchOpacity = ['match', ['to-string', ['get', 'group']]];
             activeRouteGroups.forEach(g => matchOpacity.push(String(g), 1));
@@ -494,7 +508,11 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-opacity', matchOpacity);
             map.setPaintProperty('lines-layer', 'line-width', matchWidth);
             map.setPaintProperty('badges-layer', 'icon-opacity', matchBadge);
-            if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-opacity', 0.10);
+            
+            // Reakce železnice na kód 000
+            if (map.getLayer('zeleznice-layer')) {
+                map.setPaintProperty('zeleznice-layer', 'line-color', activeRouteGroups.includes('000') ? '#ffffff' : '#444444');
+            }
         }
     }
     updateURL();
@@ -536,7 +554,11 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE) ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
+let cachedVehicleId = null;
+let cachedInfoRaw = null;
+let cachedTimetableRaw = null;
+
 window.openTimetable = async function(vehicleId, delayInMinutes) {
     const modalContent = document.getElementById('timetable-modal-content');
     const modal = document.getElementById('timetable-modal');
@@ -573,7 +595,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             if (bottomRow) bottomRow.remove();
         }
         
-        // Převedení zpoždění do tabulky (bez dotazů na server)
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
@@ -602,14 +623,12 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             }
         }
 
-        // Zámek zalamování prvního sloupce 
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
             }
         });
 
-        // Udržení aktuální pozice scrollu, aby okno neskákalo
         const currentScroll = modalContent.scrollTop;
         modalContent.innerHTML = tempDiv.innerHTML;
         modalContent.scrollTop = currentScroll;
@@ -631,9 +650,8 @@ async function handleVehicleClick(v) {
 
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
-    const routeToHighlight = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3); 
+    const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
     
-    // Identifikace komerčních / neintegrovaných spojů
     const isNonVDV = vTextStr.startsWith('620') || 
                      vTextStr.startsWith('35500') || 
                      vTextStr.startsWith('84500') || 
@@ -655,7 +673,6 @@ async function handleVehicleClick(v) {
             cachedTimetableRaw = timetableRaw;
             cachedVehicleId = v.id;
             
-            // Rekalkulace trasy jen při stažení nových dat
             map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
             if (!isNonVDV) {
                 if (!isTrain && geojsonData) {
@@ -743,7 +760,6 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // Odstraníme statické zpoždění od serveru
         const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
         let n;
         let toRemoveDelay = [];
@@ -756,7 +772,6 @@ async function handleVehicleClick(v) {
         }
         toRemoveDelay.forEach(c => c.remove());
 
-        // --- VLOŽENÍ SMĚRU VČETNĚ DOTAZU NA WIKIDATA ---
         if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
@@ -781,7 +796,6 @@ async function handleVehicleClick(v) {
             }
         }
 
-        // VLOŽENÍ NOVÉHO DYNAMICKÉHO ZPOŽDĚNÍ Z GETPOINTS (Pokud existuje)
         if (v.delay !== -2147483648) {
             let targetTr = null;
             tempDiv.querySelectorAll('tr').forEach(tr => {
@@ -833,7 +847,6 @@ async function handleVehicleClick(v) {
             });
         }
 
-        // Zabránění zalamování prvního sloupce v Detailu vozidla
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
@@ -875,7 +888,6 @@ async function handleVehicleClick(v) {
             const bar = document.getElementById('mobile-bottom-bar');
             const barContent = document.getElementById('mobile-bar-content');
             
-            // Zachování scrollu na mobilu při plynulém updatu
             const currentScroll = barContent.scrollTop;
             barContent.innerHTML = cleanHtml;
             barContent.scrollTop = currentScroll;
@@ -889,7 +901,6 @@ async function handleVehicleClick(v) {
                 } 
             };
         } else {
-            // Bezproblikový update popupu přes setHTML s existující instancí
             if (currentPopup && currentPopup.isOpen()) {
                 currentPopup.setLngLat([v.lng, v.lat]).setHTML(cleanHtml);
             } else {
@@ -910,7 +921,7 @@ function toggleRealtimeMode(forceState = null) {
         if(btn) btn.classList.add('active');
         highlightRoute(activeRouteGroups);
         
-        clearInterval(rtInterval);
+        clearInterval(rtInterval); 
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
@@ -949,10 +960,12 @@ async function fetchLiveVehicles() {
 
                 const isTrain = v.traction === 'TRAIN';
                 const vTextStr = String(v.text || '');
+                const routeOfVehicle = isTrain ? vTextStr : getShortLine(vTextStr);
                 
                 if (activeRouteGroups.length > 0) {
-                    const routeOfVehicle = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3);
-                    if (!activeRouteGroups.includes(routeOfVehicle)) return false;
+                    const trainMatch = isTrain && activeRouteGroups.includes('000');
+                    const busMatch = activeRouteGroups.includes(routeOfVehicle);
+                    if (!trainMatch && !busMatch) return false;
                 }
                 
                 const isUnknownDelay = v.delay === -2147483648;
@@ -966,7 +979,7 @@ async function fetchLiveVehicles() {
             }).map(v => {
                 const isTrain = v.traction === 'TRAIN';
                 const vTextStr = String(v.text || '');
-                const shortLine = vTextStr.replace(/\D/g, '').slice(-3) || "??";
+                const shortLine = getShortLine(vTextStr);
                 
                 const isNonVDV = vTextStr.startsWith('620') || 
                                  vTextStr.startsWith('35500') || 
@@ -1005,7 +1018,6 @@ async function fetchLiveVehicles() {
                     if (isTimetableOpen) openTimetable(vToClick.id, vToClick.delay);
                     initialLoadAutoClickDone = true;
                 } else {
-                    // Plynulý (bezešvý) update otevřených informací a pozice
                     handleVehicleClick(vToClick);
                     if (isTimetableOpen) openTimetable(vToClick.id, vToClick.delay);
                 }
