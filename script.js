@@ -13,7 +13,6 @@ let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
-// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -22,7 +21,7 @@ if (!window.location.search || window.location.search === '?') {
     if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
     if (urlParams.has('line')) activeRouteGroups = urlParams.getAll('line'); 
     if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
-    if (urlParams.has('id')) selectedVehicleId = parseInt(urlParams.get('id'), 10);
+    if (urlParams.has('id')) selectedVehicleId = urlParams.get('id'); // Bez parseInt, aby prošlo i textové ID "J14"
     if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
 }
 
@@ -31,7 +30,6 @@ let allStops = [];
 let tripShapes = {}; 
 let trainStopsMap = {}; 
 
-// --- POMOCNÁ FUNKCE: Odstranění nul z čísel linek (042 -> 42) ---
 function getShortLine(text) {
     const s = String(text || '').replace(/\D/g, '').slice(-3);
     return s ? parseInt(s, 10).toString() : "??";
@@ -102,7 +100,9 @@ function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
         if (el && el.textContent) {
             const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            if (txt.includes('bezbari')) el.remove();
+            if (txt.includes('bezbari')) {
+                el.remove();
+            }
         }
     });
 }
@@ -368,7 +368,6 @@ map.on('load', async () => {
         if (resZelGeo.ok) {
             const zelGeoData = await resZelGeo.json();
             map.addSource('zeleznice-trasy', { type: 'geojson', data: zelGeoData });
-            // Železnice vykreslena plnou barvou, žádné násobení opacit se nekoná
             map.addLayer({
                 id: 'zeleznice-layer',
                 type: 'line',
@@ -395,7 +394,6 @@ map.on('load', async () => {
                 });
             }
             if (f.geometry.type === 'Point' && f.properties.type === 'badge') {
-                // Převod uloženého čísla skupiny na čistý formát bez nul
                 f.properties.group = getShortLine(f.properties.group);
                 f.properties.iconId = getBadgeIcon(f.properties.group, f.properties.color);
             }
@@ -482,7 +480,6 @@ map.on('load', async () => {
     }
 });
 
-// --- 4. INTERAKCE A FOCUS ---
 function highlightRoute(groups) {
     activeRouteGroups = Array.isArray(groups) ? groups.map(String) : (groups ? [String(groups)] : []);
     
@@ -509,7 +506,6 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-width', matchWidth);
             map.setPaintProperty('badges-layer', 'icon-opacity', matchBadge);
             
-            // Reakce železnice na kód 000
             if (map.getLayer('zeleznice-layer')) {
                 map.setPaintProperty('zeleznice-layer', 'line-color', activeRouteGroups.includes('000') ? '#ffffff' : '#444444');
             }
@@ -554,7 +550,7 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE PRO VDV) ---
 let cachedVehicleId = null;
 let cachedInfoRaw = null;
 let cachedTimetableRaw = null;
@@ -648,6 +644,46 @@ async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
 
+    // Pokud se jedná o Jihlavu, nevykreslujeme cizí detail (krajský)
+    const isJihlava = v.isJihlava === true || v.isJihlava === 'true';
+
+    if (isJihlava) {
+        map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+        
+        let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
+        let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
+        if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
+        
+        let html = `
+            <div style="padding: 5px; font-family: 'Open Sans', Arial, sans-serif;">
+                <div style="font-size: 16px; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #444; padding-bottom: 5px;">MHD Jihlava</div>
+                <table style="width: 100%; border-spacing: 0; line-height: 1.6;">
+                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Linka:</th><td><strong>${v.text}</strong></td></tr>
+                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Směr:</th><td><strong>${v.finalStopName}</strong></td></tr>
+                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Poslední zastávka:</th><td>${v.lastStop}</td></tr>
+                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Zpoždění:</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
+                </table>
+                <div style="color: #ff4d4d; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Jízdní řád není k dispozici</div>
+            </div>
+        `;
+
+        if (window.innerWidth <= 768) {
+            const bar = document.getElementById('mobile-bottom-bar');
+            document.getElementById('mobile-bar-content').innerHTML = html;
+            bar.classList.remove('hidden');
+            bar.onclick = null;
+        } else {
+            if (currentPopup && currentPopup.isOpen()) {
+                currentPopup.setLngLat([v.lng, v.lat]).setHTML(html);
+            } else {
+                if (currentPopup) currentPopup.remove();
+                currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(html).addTo(map);
+            }
+        }
+        return;
+    }
+
+    // --- LOGIKA PRO KRAJSKÉ VDV SPOJE ---
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
@@ -772,7 +808,7 @@ async function handleVehicleClick(v) {
         }
         toRemoveDelay.forEach(c => c.remove());
 
-        if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
+        if (v.finalStopName && v.finalStopName.trim() !== '' && !/n\/a/i.test(v.finalStopName)) {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
             if (isTrain) {
@@ -950,41 +986,38 @@ async function fetchLiveVehicles() {
     isFetchingVehicles = true;
     try {
         const timestamp = new Date().getTime();
-        const response = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`);
-        const data = await response.json();
+        
+        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
+        const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
+        
+        const [vdvRes, jihRes] = await Promise.allSettled([
+            fetch(vdvUrl).then(r => r.json()),
+            fetch(jihlavaUrl).then(r => r.json())
+        ]);
+        
+        let allVehicles = [];
+        
+        if (vdvRes.status === 'fulfilled') {
+            const vdvData = vdvRes.value;
+            vdvData.forEach(v => {
+                if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return;
 
-        const geojson = {
-            type: 'FeatureCollection',
-            features: data.filter(v => {
-                if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return false;
-
-                const isTrain = v.traction === 'TRAIN';
-                const vTextStr = String(v.text || '');
-                const routeOfVehicle = isTrain ? vTextStr : getShortLine(vTextStr);
-                
-                if (activeRouteGroups.length > 0) {
-                    const trainMatch = isTrain && activeRouteGroups.includes('000');
-                    const busMatch = activeRouteGroups.includes(routeOfVehicle);
-                    if (!trainMatch && !busMatch) return false;
-                }
-                
-                const isUnknownDelay = v.delay === -2147483648;
-                const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
-                
-                if (isUnknownDelay && hasNaDirection && !isTrain) {
-                    return false;
-                }
-                
-                return true;
-            }).map(v => {
                 const isTrain = v.traction === 'TRAIN';
                 const vTextStr = String(v.text || '');
                 const shortLine = getShortLine(vTextStr);
                 
-                const isNonVDV = vTextStr.startsWith('620') || 
-                                 vTextStr.startsWith('35500') || 
-                                 vTextStr.startsWith('84500') || 
-                                 ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
+                if (activeRouteGroups.length > 0) {
+                    const routeOfVehicle = isTrain ? vTextStr : shortLine;
+                    const trainMatch = isTrain && activeRouteGroups.includes('000');
+                    const busMatch = activeRouteGroups.includes(routeOfVehicle);
+                    if (!trainMatch && !busMatch) return;
+                }
+                
+                const isUnknownDelay = v.delay === -2147483648;
+                const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
+                if (isUnknownDelay && hasNaDirection && !isTrain) return;
+                
+                const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
                 
                 let delayClass = 'ok';
                 if (v.delay === -2147483648) delayClass = 'unknown';
@@ -995,31 +1028,78 @@ async function fetchLiveVehicles() {
                     delayClass = 'dim'; 
                 }
 
-                const iconId = getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV);
-
-                return {
+                allVehicles.push({
                     type: 'Feature',
                     geometry: { type: 'Point', coordinates: [v.lng, v.lat] },
                     properties: {
-                        id: v.id, delay: v.delay, traction: v.traction, text: v.text, lng: v.lng, lat: v.lat,
-                        iconId: iconId, finalStopName: v.finalStopName || ""
+                        id: String(v.id), delay: v.delay, traction: v.traction, text: vTextStr, lng: v.lng, lat: v.lat,
+                        iconId: getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV), 
+                        finalStopName: v.finalStopName || "", shortLine: shortLine,
+                        isJihlava: false, isTrain: isTrain, isNonVDV: isNonVDV
                     }
-                };
-            })
-        };
+                });
+            });
+        }
+        
+        if (jihRes.status === 'fulfilled') {
+            const jihData = jihRes.value;
+            if (jihData.features) {
+                jihData.features.forEach(f => {
+                    const p = f.properties;
+                    const geom = f.geometry;
+                    if (!geom || !geom.coordinates) return;
+                    
+                    const shortLine = String(p.linka).trim();
+                    
+                    if (activeRouteGroups.length > 0) {
+                        if (!activeRouteGroups.includes(shortLine)) return;
+                    }
+                    
+                    let delay = p.delayinmins != null ? p.delayinmins : -2147483648;
+                    
+                    let delayClass = 'ok';
+                    if (delay === -2147483648) delayClass = 'unknown';
+                    else if (delay > 2 && delay <= 9) delayClass = 'warn';
+                    else if (delay >= 10) delayClass = 'alert';
+                    
+                    if (shortLine.length <= 2) delayClass = 'dim';
 
+                    allVehicles.push({
+                        type: 'Feature',
+                        geometry: { type: 'Point', coordinates: [geom.coordinates[0], geom.coordinates[1]] },
+                        properties: {
+                            id: "J" + p.objectid,
+                            delay: delay,
+                            traction: p.typ === "trolejbus" ? "TROLLEYBUS" : "BUS",
+                            text: p.linka,
+                            lng: geom.coordinates[0],
+                            lat: geom.coordinates[1],
+                            iconId: getVehicleIcon(delayClass, shortLine, false, false),
+                            finalStopName: p.konecna || "",
+                            shortLine: shortLine,
+                            isJihlava: true,
+                            isTrain: false,
+                            isNonVDV: false,
+                            lastStop: p.posledni || ""
+                        }
+                    });
+                });
+            }
+        }
+
+        const geojson = { type: 'FeatureCollection', features: allVehicles };
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
         if (selectedVehicleId !== null) {
-            const vToClick = data.find(item => item.id === selectedVehicleId);
+            const vToClick = allVehicles.find(item => String(item.properties.id) === String(selectedVehicleId));
             if (vToClick) {
                 if (!initialLoadAutoClickDone) {
-                    handleVehicleClick(vToClick);
-                    if (isTimetableOpen) openTimetable(vToClick.id, vToClick.delay);
+                    handleVehicleClick(vToClick.properties);
+                    if (isTimetableOpen && !vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
                     initialLoadAutoClickDone = true;
                 } else {
-                    handleVehicleClick(vToClick);
-                    if (isTimetableOpen) openTimetable(vToClick.id, vToClick.delay);
+                    handleVehicleClick(vToClick.properties);
+                    if (isTimetableOpen && !vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
                 }
             }
         }
