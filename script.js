@@ -13,6 +13,7 @@ let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
+// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -21,7 +22,7 @@ if (!window.location.search || window.location.search === '?') {
     if (urlParams.has('x')) startLng = parseFloat(urlParams.get('x'));
     if (urlParams.has('line')) activeRouteGroups = urlParams.getAll('line'); 
     if (urlParams.has('rt') && urlParams.get('rt') === '1') isRealtimeMode = true;
-    if (urlParams.has('id')) selectedVehicleId = urlParams.get('id'); // Bez parseInt, aby prošlo i textové ID "J14"
+    if (urlParams.has('id')) selectedVehicleId = urlParams.get('id'); 
     if (urlParams.has('tt') && urlParams.get('tt') === '1') isTimetableOpen = true;
 }
 
@@ -77,7 +78,8 @@ const map = new maplibregl.Map({
 });
 
 async function fetchKrajskeHtml(url) {
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+    // Použití nového spolehlivého proxy serveru AllOrigins
+    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
     if (!res.ok) throw new Error("Chyba při stahování HTML");
     return await res.text();
@@ -644,7 +646,6 @@ async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
 
-    // Pokud se jedná o Jihlavu, nevykreslujeme cizí detail (krajský)
     const isJihlava = v.isJihlava === true || v.isJihlava === 'true';
 
     if (isJihlava) {
@@ -683,7 +684,6 @@ async function handleVehicleClick(v) {
         return;
     }
 
-    // --- LOGIKA PRO KRAJSKÉ VDV SPOJE ---
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
@@ -957,7 +957,7 @@ function toggleRealtimeMode(forceState = null) {
         if(btn) btn.classList.add('active');
         highlightRoute(activeRouteGroups);
         
-        clearInterval(rtInterval); 
+        clearInterval(rtInterval);
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
@@ -987,8 +987,9 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
-        const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
+        // --- ZMĚNA ZDE: AllOrigins proxy pro bezplatný spolehlivý fetch ---
+        const jihlavaUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
+        const vdvUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
         const [vdvRes, jihRes] = await Promise.allSettled([
             fetch(vdvUrl).then(r => r.json()),
