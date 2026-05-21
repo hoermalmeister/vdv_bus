@@ -617,7 +617,7 @@ async function handleVehicleClick(v) {
     const routeToHighlight = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3); 
     
     // Identifikace komerčních / ne-VDV spojů
-    const nonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35000') || vTextStr.startsWith('84500');
+    const nonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500');
 
     try {
         const [infoRaw, timetableRaw] = await Promise.all([
