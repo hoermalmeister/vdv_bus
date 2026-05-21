@@ -46,7 +46,7 @@ async function getStationNameByUIC(uic) {
             }
         }
     } catch (e) { console.warn("Chyba při dotazu na Wikidata:", e); }
-    uicCache[uic] = uic; // Záloha: pokud Wikidata selžou, vrátí se aspoň čisté UIC číslo bez "N/a"
+    uicCache[uic] = uic; 
     return uic;
 }
 
@@ -610,9 +610,14 @@ let currentPopup = null;
 async function handleVehicleClick(v) {
     selectedVehicleId = v.id;
     updateURL();
+    highlightRoute([]); 
 
     const isTrain = v.traction === 'TRAIN';
-    const routeToHighlight = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3); 
+    const vTextStr = String(v.text || '');
+    const routeToHighlight = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3); 
+    
+    // Identifikace komerčních / ne-VDV spojů
+    const nonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35000') || vTextStr.startsWith('84500');
 
     try {
         const [infoRaw, timetableRaw] = await Promise.all([
@@ -622,79 +627,82 @@ async function handleVehicleClick(v) {
 
         map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
-        if (!isTrain && geojsonData) {
-            let multiLineCoords = [];
-            geojsonData.features.forEach(f => {
-                if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) {
-                    if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
-                    else multiLineCoords.push(...f.geometry.coordinates);
+        // Vykreslení trasy pouze pro VDV spoje
+        if (!nonVDV) {
+            if (!isTrain && geojsonData) {
+                let multiLineCoords = [];
+                geojsonData.features.forEach(f => {
+                    if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) {
+                        if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
+                        else multiLineCoords.push(...f.geometry.coordinates);
+                    }
+                });
+
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(timetableRaw, 'text/html');
+                const labelSpan = doc.getElementById('currentLineRouteLabel');
+                
+                let linka = "", spoj = "";
+                if (labelSpan) {
+                    const parts = labelSpan.innerText.split('/');
+                    if(parts.length >= 1) linka = parts[0].trim();
+                    if(parts.length >= 2) spoj = parts[1].trim();
                 }
-            });
 
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(timetableRaw, 'text/html');
-            const labelSpan = doc.getElementById('currentLineRouteLabel');
-            
-            let linka = "", spoj = "";
-            if (labelSpan) {
-                const parts = labelSpan.innerText.split('/');
-                if(parts.length >= 1) linka = parts[0].trim();
-                if(parts.length >= 2) spoj = parts[1].trim();
-            }
+                let firstTime = "";
+                const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
+                if (firstTimeCell) {
+                    const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/);
+                    if (timeMatch) firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; 
+                }
 
-            let firstTime = "";
-            const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
-            if (firstTimeCell) {
-                const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/);
-                if (timeMatch) firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; 
-            }
+                const vdvKey = `${linka}/${spoj}`;
+                const pidKey = `${linka}/PID${firstTime}`;
 
-            const vdvKey = `${linka}/${spoj}`;
-            const pidKey = `${linka}/PID${firstTime}`;
+                const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
 
-            const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
+                if (rawCoords && rawCoords.length > 1) {
+                    const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } };
+                    map.getSource('trip-route').setData(geoJsonLine);
+                } else {
+                    const stopCells = doc.querySelectorAll('tbody tr td:first-child');
+                    let stopCoords = [];
+                    let previousCoord = null;
 
-            if (rawCoords && rawCoords.length > 1) {
-                const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } };
-                map.getSource('trip-route').setData(geoJsonLine);
-            } else {
+                    stopCells.forEach(cell => {
+                        const normName = normalizeStopName(cell.innerText);
+                        const bestCoord = findBestStop(normName, multiLineCoords, previousCoord);
+                        if (bestCoord) { stopCoords.push(bestCoord); previousCoord = bestCoord; }
+                    });
+
+                    if (stopCoords.length > 1) {
+                        let finalTripCoords = [stopCoords[0]];
+                        for (let i = 0; i < stopCoords.length - 1; i++) {
+                            let A = stopCoords[i], B = stopCoords[i+1];
+                            let roadPath = getPathBetweenStops(A, B, multiLineCoords);
+                            if (roadPath) finalTripCoords.push(...roadPath);
+                            else finalTripCoords.push(B); 
+                        }
+                        map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: finalTripCoords }});
+                    }
+                }
+            } else if (isTrain) {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(timetableRaw, 'text/html');
                 const stopCells = doc.querySelectorAll('tbody tr td:first-child');
                 let stopCoords = [];
-                let previousCoord = null;
 
                 stopCells.forEach(cell => {
-                    const normName = normalizeStopName(cell.innerText);
-                    const bestCoord = findBestStop(normName, multiLineCoords, previousCoord);
-                    if (bestCoord) { stopCoords.push(bestCoord); previousCoord = bestCoord; }
+                    let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim();
+                    if (trainStopsMap[rawName]) {
+                        stopCoords.push(trainStopsMap[rawName]);
+                    }
                 });
 
                 if (stopCoords.length > 1) {
-                    let finalTripCoords = [stopCoords[0]];
-                    for (let i = 0; i < stopCoords.length - 1; i++) {
-                        let A = stopCoords[i], B = stopCoords[i+1];
-                        let roadPath = getPathBetweenStops(A, B, multiLineCoords);
-                        if (roadPath) finalTripCoords.push(...roadPath);
-                        else finalTripCoords.push(B); 
-                    }
-                    map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: finalTripCoords }});
+                    const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } };
+                    map.getSource('trip-route').setData(geoJsonLine);
                 }
-            }
-        } else if (isTrain) {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(timetableRaw, 'text/html');
-            const stopCells = doc.querySelectorAll('tbody tr td:first-child');
-            let stopCoords = [];
-
-            stopCells.forEach(cell => {
-                let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim();
-                if (trainStopsMap[rawName]) {
-                    stopCoords.push(trainStopsMap[rawName]);
-                }
-            });
-
-            if (stopCoords.length > 1) {
-                const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } };
-                map.getSource('trip-route').setData(geoJsonLine);
             }
         }
 
@@ -709,10 +717,11 @@ async function handleVehicleClick(v) {
         if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
-            // Zachycení UIC kódu (např. 5475860 N/a)
-            let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i);
-            if (uicMatch) {
-                formattedStopName = await getStationNameByUIC(uicMatch[1]);
+            if (isTrain) {
+                let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i);
+                if (uicMatch) {
+                    formattedStopName = await getStationNameByUIC(uicMatch[1]);
+                }
             }
 
             let targetTr = null;
@@ -784,6 +793,35 @@ async function handleVehicleClick(v) {
             }
         });
 
+        // PŘIDÁNÍ VAROVÁNÍ PRO NEINTEGROVANÉ (KOMERČNÍ) SPOJE
+        if (nonVDV) {
+            const table = tempDiv.querySelector('table') || tempDiv.querySelector('tbody');
+            if (table) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 2;
+                td.style.color = '#ff4d4d';
+                td.style.fontWeight = '300';
+                td.style.fontSize = '12px';
+                td.style.textAlign = 'center';
+                td.style.paddingTop = '10px';
+                td.innerText = 'Na spoji neplatí doklady VDV';
+                tr.appendChild(td);
+                const tbody = table.tagName === 'TBODY' ? table : table.querySelector('tbody');
+                if (tbody) tbody.appendChild(tr);
+                else table.appendChild(tr);
+            } else {
+                const warningMsg = document.createElement('div');
+                warningMsg.style.color = '#ff4d4d'; 
+                warningMsg.style.fontWeight = '300';
+                warningMsg.style.fontSize = '12px';
+                warningMsg.style.textAlign = 'center';
+                warningMsg.style.marginTop = '10px';
+                warningMsg.innerText = 'Na spoji neplatí doklady VDV';
+                tempDiv.appendChild(warningMsg);
+            }
+        }
+
         cleanHtml = tempDiv.innerHTML;
 
         if (window.innerWidth <= 768) {
@@ -851,7 +889,7 @@ async function fetchLiveVehicles() {
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
-                // SKRYTÍ VOZIDEL BEZ JÍZDNÍHO ŘÁDU (zpoždění je plně neznámé)
+                // PŮVODNÍ SPOLUHLIVÝ FILTR (zpoždění je plně neznámé)
                 if (v.delay === -2147483648) {
                     return false;
                 }
@@ -862,8 +900,7 @@ async function fetchLiveVehicles() {
                 const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
                 
                 let delayClass = 'ok';
-                if (v.delay === -2147483648) delayClass = 'unknown'; // Neznámá se už sice nevykreslí, ale necháváme pro sychr
-                else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
+                if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
                 else if (v.delay >= 10) delayClass = 'alert';
 
                 if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
