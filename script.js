@@ -172,7 +172,6 @@ function updateURL() {
     params.set('z', map.getZoom().toFixed(1));
     if (isRealtimeMode) params.set('rt', '1');
     
-    // Zapsání všech aktivních linek do URL
     if (activeRouteGroups.length > 0) {
         activeRouteGroups.forEach(g => params.append('line', g));
     }
@@ -333,6 +332,25 @@ map.on('load', async () => {
         }
     } catch(e) { console.warn("zeleznice.txt pro vlaky nenalezeno", e); }
 
+    // NAČTENÍ BÍLÝCH TRAS ŽELEZNICE
+    try {
+        const resZelGeo = await fetch('zeleznice.geojson?t=' + new Date().getTime());
+        if (resZelGeo.ok) {
+            const zelGeoData = await resZelGeo.json();
+            map.addSource('zeleznice-trasy', { type: 'geojson', data: zelGeoData });
+            map.addLayer({
+                id: 'zeleznice-layer',
+                type: 'line',
+                source: 'zeleznice-trasy',
+                paint: {
+                    'line-color': '#ffffff',
+                    'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2, 15, 5],
+                    'line-opacity': 0.8
+                }
+            }); 
+        }
+    } catch(e) { console.warn("zeleznice.geojson nenalezena", e); }
+
     try {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
         geojsonData = await res.json();
@@ -440,6 +458,7 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-opacity', isRealtimeMode ? 0.10 : 0.9);
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
+            if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-opacity', isRealtimeMode ? 0.10 : 0.8);
         } else {
             const matchOpacity = ['match', ['to-string', ['get', 'group']]];
             activeRouteGroups.forEach(g => matchOpacity.push(String(g), 1));
@@ -456,6 +475,7 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-opacity', matchOpacity);
             map.setPaintProperty('lines-layer', 'line-width', matchWidth);
             map.setPaintProperty('badges-layer', 'icon-opacity', matchBadge);
+            if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-opacity', 0.10);
         }
     }
     updateURL();
@@ -463,7 +483,8 @@ function highlightRoute(groups) {
 
 map.on('click', (e) => {
     const vFeatures = map.queryRenderedFeatures(e.point, { layers: ['vehicles-layer'] });
-    const lineFeatures = map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
+    // Zásadní změna: Pokud je zapnuto RT (živá mapa), ignorujeme kliky na silnice
+    const lineFeatures = isRealtimeMode ? [] : map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
 
     if (!vFeatures.length && !lineFeatures.length) {
         const hadLine = activeRouteGroups.length > 0;
@@ -471,11 +492,11 @@ map.on('click', (e) => {
 
         if (hadLine || hadVehicle) {
             if (hadLine) {
-                // Pokud vyklikneme a je aktivní filtr linky, chceme nejen zrušit filtr, ale i celý RT (dle zadání uživatele)
+                // Pokud vyklikneme a je aktivní filtr linky, zrušíme všechno a vypneme RT
                 if (isRealtimeMode) toggleRealtimeMode(false);
                 else highlightRoute([]);
             } else {
-                // Pokud nebyla vybraná žádná linka (jenom volná mapa s vozidly), tak zavřeme detail vozu, ale RT necháme žít
+                // Pokud nebyla vybraná linka (jenom velká živá mapa), vypneme pouze detail autobusu
                 selectedVehicleId = null;
                 map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
                 document.getElementById('mobile-bottom-bar').classList.add('hidden');
@@ -486,27 +507,19 @@ map.on('click', (e) => {
     } else if (vFeatures.length) {
         handleVehicleClick(vFeatures[0].properties);
     } else if (lineFeatures.length) {
+        // Sem se kód dostane, jen pokud JSME v mapě linek (nikoliv v RT módu)
         const group = String(lineFeatures[0].properties.group);
-        const isOnlySelected = activeRouteGroups.length === 1 && activeRouteGroups[0] === group;
-        
-        if (isOnlySelected) {
-            // Opětovné kliknutí na už vybranou linku
-            if (isRealtimeMode) toggleRealtimeMode(false);
-            else highlightRoute([]);
-        } else {
-            highlightRoute([group]); 
-            if (!isRealtimeMode) {
-                toggleRealtimeMode(true); 
-            } else {
-                fetchLiveVehicles(); 
-            }
-        }
+        highlightRoute([group]); 
+        toggleRealtimeMode(true); 
     }
 });
 
+// Kurzorové efekty - nad silnicí se objeví ručička jen když JSME ve statické mapě linek
 map.on('mouseenter', 'vehicles-layer', () => map.getCanvas().style.cursor = 'pointer');
 map.on('mouseleave', 'vehicles-layer', () => map.getCanvas().style.cursor = '');
-map.on('mouseenter', 'badges-layer', () => map.getCanvas().style.cursor = 'pointer');
+map.on('mouseenter', 'lines-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
+map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
+map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
 // --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
@@ -762,7 +775,7 @@ function toggleRealtimeMode(forceState = null) {
         if (currentPopup) currentPopup.remove();
         
         selectedVehicleId = null;
-        highlightRoute([]); // IMPORTANT: Tento řádek maže filtry při vypnutí RT!
+        highlightRoute([]); 
     }
     updateURL();
 }
