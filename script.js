@@ -30,6 +30,26 @@ let allStops = [];
 let tripShapes = {}; 
 let trainStopsMap = {}; 
 
+// --- 0. WIKIDATA API PRO UIC KÓDY STANIC ---
+const uicCache = {};
+async function getStationNameByUIC(uic) {
+    if (uicCache[uic]) return uicCache[uic];
+    try {
+        const query = `SELECT ?itemLabel WHERE { ?item wdt:P722 "${uic}". SERVICE wikibase:label { bd:serviceParam wikibase:language "cs". } }`;
+        const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(query)}&format=json`;
+        const res = await fetch(url, { headers: { 'Accept': 'application/sparql-results+json' }});
+        if (res.ok) {
+            const data = await res.json();
+            if (data.results.bindings.length > 0) {
+                uicCache[uic] = data.results.bindings[0].itemLabel.value;
+                return uicCache[uic];
+            }
+        }
+    } catch (e) { console.warn("Chyba při dotazu na Wikidata:", e); }
+    uicCache[uic] = uic; // Záloha: pokud Wikidata selžou, vrátí se aspoň čisté UIC číslo bez "N/a"
+    return uic;
+}
+
 // --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
 const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = new maplibregl.Map({
@@ -567,6 +587,14 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
                 });
             }
         }
+
+        // Zabránění zalamování prvního sloupce v Jízdním řádu
+        tempDiv.querySelectorAll('tr').forEach(tr => {
+            if (tr.firstElementChild) {
+                tr.firstElementChild.style.whiteSpace = 'nowrap';
+            }
+        });
+
         document.getElementById('timetable-modal-content').innerHTML = tempDiv.innerHTML;
     } catch(e) { document.getElementById('timetable-modal-content').innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
@@ -677,9 +705,16 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // VLOŽENÍ SMĚRU (Cílové zastávky) S MEZERAMI ZA ČÁRKAMI
+        // --- VLOŽENÍ SMĚRU VČETNĚ DOTAZU NA WIKIDATA ---
         if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
-            let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); // Správné přidání mezer za čárky
+            let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
+            
+            // Zachycení UIC kódu (např. 5475860 N/a)
+            let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i);
+            if (uicMatch) {
+                formattedStopName = await getStationNameByUIC(uicMatch[1]);
+            }
+
             let targetTr = null;
             tempDiv.querySelectorAll('tr').forEach(tr => {
                 const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -741,6 +776,13 @@ async function handleVehicleClick(v) {
                 }
             });
         }
+
+        // Zabránění zalamování prvního sloupce v Detailu vozidla
+        tempDiv.querySelectorAll('tr').forEach(tr => {
+            if (tr.firstElementChild) {
+                tr.firstElementChild.style.whiteSpace = 'nowrap';
+            }
+        });
 
         cleanHtml = tempDiv.innerHTML;
 
@@ -809,8 +851,8 @@ async function fetchLiveVehicles() {
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
-                // SKRYTÍ MANIPULAČNÍCH JÍZD (Nemají platný cíl, jeví se jako "-1 N/a")
-                if (v.finalStopName && v.finalStopName.includes('-1 N/a')) {
+                // SKRYTÍ VOZIDEL BEZ JÍZDNÍHO ŘÁDU (zpoždění je plně neznámé)
+                if (v.delay === -2147483648) {
                     return false;
                 }
                 
@@ -820,7 +862,7 @@ async function fetchLiveVehicles() {
                 const shortLine = v.text.replace(/\D/g, '').slice(-3) || "??";
                 
                 let delayClass = 'ok';
-                if (v.delay === -2147483648) delayClass = 'unknown';
+                if (v.delay === -2147483648) delayClass = 'unknown'; // Neznámá se už sice nevykreslí, ale necháváme pro sychr
                 else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
                 else if (v.delay >= 10) delayClass = 'alert';
 
