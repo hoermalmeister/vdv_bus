@@ -6,6 +6,7 @@ let selectedVehicleId = null;
 let isTimetableOpen = false;
 let rtInterval = null;
 let initialLoadAutoClickDone = false; 
+let isFetchingVehicles = false; // Zámek proti zasekávání požadavků
 
 // Pole pro uložení jedné nebo vícero linek z URL
 let activeRouteGroups = [];
@@ -186,7 +187,7 @@ function getPathBetweenStops(coordA, coordB, multiLineCoords) {
 
 function updateURL() {
     const center = map.getCenter();
-    const params = newSearchParams();
+    const params = new URLSearchParams();
     params.set('x', center.lng.toFixed(4));
     params.set('y', center.lat.toFixed(4));
     params.set('z', map.getZoom().toFixed(1));
@@ -252,7 +253,6 @@ function getBadgeIcon(group, color) {
     return id;
 }
 
-// Rozšířeno o možnost zobrazení "modrého" ohraničení pro komerční (nonVDV) linky
 function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     const id = `v-${delayClass}-${label}-${isTrain ? 't' : 'b'}-${isNonVDV ? 'nvdv' : 'vdv'}`;
     if (map.hasImage(id)) return id;
@@ -264,10 +264,7 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     const ctx = canvas.getContext('2d');
     ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
 
-    let bgColor = '#58d68d'; 
-    let textColor = '#111'; 
-    
-    // Zde nastavíme standardní bílý rámeček pro integraci, nebo modrý pro komerční spoje
+    let bgColor = '#58d68d'; let textColor = '#111'; 
     let borderColor = isNonVDV ? '#3498db' : '#fff'; 
     
     if (delayClass === 'unknown') { bgColor = '#7f8c8d'; textColor = '#fff'; }
@@ -275,7 +272,7 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     else if (delayClass === 'alert') { bgColor = '#e74c3c'; textColor = '#fff'; }
     else if (delayClass === 'dim') { 
         bgColor = '#1a2530'; 
-        borderColor = isNonVDV ? '#2980b9' : '#2c3e50'; // Ztmavená modrá vs ztmavená šedá
+        borderColor = isNonVDV ? '#2980b9' : '#2c3e50'; 
         textColor = '#5dade2'; 
     }
 
@@ -317,7 +314,6 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
-    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
@@ -598,7 +594,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             }
         }
 
-        // Zabránění zalamování prvního sloupce v Jízdním řádu
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
@@ -626,7 +621,7 @@ async function handleVehicleClick(v) {
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3); 
     
-    // Nekompromisní detekce neintegrovaných (komerčních) spojů VDV dle zadaných pravidel
+    // Identifikace komerčních / neintegrovaných spojů
     const isNonVDV = vTextStr.startsWith('620') || 
                      vTextStr.startsWith('35500') || 
                      vTextStr.startsWith('84500') || 
@@ -640,7 +635,7 @@ async function handleVehicleClick(v) {
 
         map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
-        // Vykreslování trasy POUZE pro integrované spoje
+        // Vykreslení trasy POUZE pro integrované spoje
         if (!isNonVDV) {
             if (!isTrain && geojsonData) {
                 let multiLineCoords = [];
@@ -726,8 +721,7 @@ async function handleVehicleClick(v) {
         tempDiv.innerHTML = cleanHtml;
         removeWheelchairInfo(tempDiv);
 
-        // --- VLOŽENÍ SMĚRU VČETNĚ DOTAZU NA WIKIDATA ---
-        if (v.finalStopName && v.finalStopName.trim() !== '') {
+        if (v.finalStopName && v.finalStopName.trim() !== '' && !v.finalStopName.includes('-1 N/a')) {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
             
             if (isTrain) {
@@ -799,14 +793,13 @@ async function handleVehicleClick(v) {
             });
         }
 
-        // Zabránění zalamování prvního sloupce v Detailu vozidla
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
             }
         });
 
-        // PŘIDÁNÍ VAROVÁNÍ PRO NEINTEGROVANÉ (KOMERČNÍ) SPOJE
+        // Přidání varování pro neintegrované spoje
         if (isNonVDV) {
             const table = tempDiv.querySelector('table') || tempDiv.querySelector('tbody');
             if (table) {
@@ -820,6 +813,7 @@ async function handleVehicleClick(v) {
                 td.style.paddingTop = '10px';
                 td.innerText = 'Na spoji neplatí doklady VDV';
                 tr.appendChild(td);
+                
                 const tbody = table.tagName === 'TBODY' ? table : table.querySelector('tbody');
                 if (tbody) tbody.appendChild(tr);
                 else table.appendChild(tr);
@@ -864,6 +858,8 @@ function toggleRealtimeMode(forceState = null) {
         map.setMaxZoom(19);
         if(btn) btn.classList.add('active');
         highlightRoute(activeRouteGroups);
+        
+        clearInterval(rtInterval); // Bezpečnostní pročištění
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
@@ -887,7 +883,9 @@ function toggleRealtimeMode(forceState = null) {
 if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
 
 async function fetchLiveVehicles() {
-    if (!isRealtimeMode) return;
+    if (!isRealtimeMode || isFetchingVehicles) return;
+    
+    isFetchingVehicles = true;
     try {
         const timestamp = new Date().getTime();
         const response = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`);
@@ -896,10 +894,14 @@ async function fetchLiveVehicles() {
         const geojson = {
             type: 'FeatureCollection',
             features: data.filter(v => {
+                // KRITICKÁ POJISTKA - Odfiltrování vozů bez souřadnic (zabrání spadnutí grafické karty)
+                if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return false;
+
                 const isTrain = v.traction === 'TRAIN';
+                const vTextStr = String(v.text || '');
                 
                 if (activeRouteGroups.length > 0) {
-                    const routeOfVehicle = isTrain ? String(v.text) : String(v.text).replace(/\D/g, '').slice(-3);
+                    const routeOfVehicle = isTrain ? vTextStr : vTextStr.replace(/\D/g, '').slice(-3);
                     if (!activeRouteGroups.includes(routeOfVehicle)) return false;
                 }
                 
@@ -907,7 +909,6 @@ async function fetchLiveVehicles() {
                 const isUnknownDelay = v.delay === -2147483648;
                 const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
                 
-                // Vlaků se tento filtr netýká (mají často N/a kvůli UIC kódu a my je chceme pro Wikidata)
                 if (isUnknownDelay && hasNaDirection && !isTrain) {
                     return false;
                 }
@@ -933,7 +934,6 @@ async function fetchLiveVehicles() {
                     delayClass = 'dim'; 
                 }
 
-                // Generování ikony vozidla s případným modrým lemováním
                 const iconId = getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV);
 
                 return {
@@ -960,7 +960,11 @@ async function fetchLiveVehicles() {
             initialLoadAutoClickDone = true;
         }
 
-    } catch (e) { console.error("Chyba RT dat:", e); }
+    } catch (e) { 
+        console.error("Chyba RT dat:", e); 
+    } finally {
+        isFetchingVehicles = false; // Odemčení zámku i po chybě sítě
+    }
 }
 
 const locateBtn = document.getElementById('locate-btn');
