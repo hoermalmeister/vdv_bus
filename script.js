@@ -78,8 +78,8 @@ const map = new maplibregl.Map({
 });
 
 async function fetchKrajskeHtml(url) {
-    // Použití nového spolehlivého proxy serveru AllOrigins
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    // Pro Krajské API se vracíme k bleskovému corsproxy.io
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
     if (!res.ok) throw new Error("Chyba při stahování HTML");
     return await res.text();
@@ -552,7 +552,7 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE PRO VDV) ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
 let cachedVehicleId = null;
 let cachedInfoRaw = null;
 let cachedTimetableRaw = null;
@@ -655,16 +655,18 @@ async function handleVehicleClick(v) {
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
+        // Vygenerování tabulky přesně ve vizuálním stylu Kraje bez zbytečných nadpisů
         let html = `
-            <div style="padding: 5px; font-family: 'Open Sans', Arial, sans-serif;">
-                <div style="font-size: 16px; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #444; padding-bottom: 5px;">MHD Jihlava</div>
-                <table style="width: 100%; border-spacing: 0; line-height: 1.6;">
-                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Linka:</th><td><strong>${v.text}</strong></td></tr>
-                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Směr:</th><td><strong>${v.finalStopName}</strong></td></tr>
-                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Poslední zastávka:</th><td>${v.lastStop}</td></tr>
-                    <tr><th style="text-align: left; padding-right: 10px; white-space: nowrap;">Zpoždění:</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
+            <div>
+                <table style="width: 100%; border-spacing: 0; line-height: 1.6; text-align: left;">
+                    <tbody>
+                        <tr><th style="padding-right: 10px; white-space: nowrap;">Linka:</th><td><strong>${v.text}</strong></td></tr>
+                        <tr><th style="padding-right: 10px; white-space: nowrap;">Směr:</th><td><strong>${v.finalStopName}</strong></td></tr>
+                        <tr><th style="padding-right: 10px; white-space: nowrap;">Poslední zastávka:</th><td>${v.lastStop}</td></tr>
+                        <tr><th style="padding-right: 10px; white-space: nowrap;">Zpoždění:</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
+                    </tbody>
                 </table>
-                <div style="color: #ff4d4d; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Jízdní řád není k dispozici</div>
+                <div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Jihlava</div>
             </div>
         `;
 
@@ -957,7 +959,7 @@ function toggleRealtimeMode(forceState = null) {
         if(btn) btn.classList.add('active');
         highlightRoute(activeRouteGroups);
         
-        clearInterval(rtInterval);
+        clearInterval(rtInterval); 
         fetchLiveVehicles();
         rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
@@ -987,9 +989,10 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // --- ZMĚNA ZDE: AllOrigins proxy pro bezplatný spolehlivý fetch ---
+        // Jihlava zůstává na allorigins (corsproxy.io blokuje GeoJSON zadarmo)
         const jihlavaUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
-        const vdvUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
+        // Krajské body vráceny zpět na rychlé corsproxy.io
+        const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
         const [vdvRes, jihRes] = await Promise.allSettled([
             fetch(vdvUrl).then(r => r.json()),
