@@ -8,10 +8,12 @@ let rtInterval = null;
 let initialLoadAutoClickDone = false; 
 let isFetchingVehicles = false; 
 
+// Pole pro uložení jedné nebo vícero linek z URL
 let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
+// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -54,42 +56,6 @@ async function getStationNameByUIC(uic) {
     return uic;
 }
 
-// --- INTEGROVANÝ PROXY ROTÁTOR ---
-// Funkce zkusí stáhnout data postupně přes různé proxy servery. Když jeden selže, zkusí automaticky další.
-const proxyServers = [
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url) => `https://thingproxy.freeboard.io/fetch/${url}`
-];
-
-async function fetchWithFallback(url) {
-    for (let proxy of proxyServers) {
-        try {
-            const proxyUrl = proxy(url);
-            const res = await fetch(proxyUrl);
-            if (res.ok) {
-                // Rychlá kontrola pro Jihlavu (aby nám CodeTabs neposlal HTML chybu místo dat)
-                const contentType = res.headers.get("content-type");
-                if (contentType && contentType.indexOf("text/html") !== -1 && url.includes("geojson")) {
-                    throw new Error("Proxy vrátila HTML místo JSONu (např. chyba ArcGIS).");
-                }
-                return await res.json();
-            }
-        } catch (e) {
-            console.warn(`Proxy ${proxy(url)} selhala:`, e);
-            // Pokračuje na další proxy v poli
-        }
-    }
-    throw new Error(`Všechny proxy servery selhaly pro URL: ${url}`);
-}
-
-async function fetchKrajskeHtml(url) {
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-    const res = await fetch(proxyUrl);
-    if (!res.ok) throw new Error("Chyba při stahování HTML");
-    return await res.text();
-}
-
 // --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
 const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = new maplibregl.Map({
@@ -110,6 +76,13 @@ const map = new maplibregl.Map({
     zoom: startZoom,
     maxZoom: initialMaxZoom
 });
+
+async function fetchKrajskeHtml(url) {
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+    const res = await fetch(proxyUrl);
+    if (!res.ok) throw new Error("Chyba při stahování HTML");
+    return await res.text();
+}
 
 function fixCommasInHtml(htmlString) {
     const tempDiv = document.createElement('div');
@@ -676,7 +649,7 @@ async function handleVehicleClick(v) {
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
-        // Identický design jako kraj, bez nadpisu, decentní footer
+        // Zde je čistý design přesně napodobující Krajské okno
         let html = `
             <div>
                 <table style="width: 100%; border-spacing: 0; line-height: 1.6; text-align: left;">
@@ -1011,15 +984,13 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // Jihlava běží přes chytrý fallback
-        const jihlavaUrl = 'https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson';
-        
-        // Krajské API natvrdo přes nejrychlejší CORS proxy
-        const vdvUrl = `https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=${timestamp}`;
+        // ZMĚNA: Dotaz na Jihlavu pro formát &f=json (který corsproxy plně propouští)
+        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=json')}`;
+        const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
         const [vdvRes, jihRes] = await Promise.allSettled([
-            fetchWithFallback(vdvUrl),
-            fetchWithFallback(jihlavaUrl)
+            fetch(vdvUrl).then(r => r.json()),
+            fetch(jihlavaUrl).then(r => r.json())
         ]);
         
         let allVehicles = [];
@@ -1068,13 +1039,16 @@ async function fetchLiveVehicles() {
             });
         }
         
+        // Zpracování ArcGIS JSON formátu
         if (jihRes.status === 'fulfilled') {
             const jihData = jihRes.value;
             if (jihData.features) {
                 jihData.features.forEach(f => {
-                    const p = f.properties;
+                    // Ve standardním JSON od ArcGIS to nejsou properties, ale attributes
+                    const p = f.attributes;
                     const geom = f.geometry;
-                    if (!geom || !geom.coordinates) return;
+                    // ArcGIS formát vrací .x a .y
+                    if (!geom || geom.x == null || geom.y == null) return; 
                     
                     const shortLine = String(p.linka).trim();
                     
@@ -1093,14 +1067,14 @@ async function fetchLiveVehicles() {
 
                     allVehicles.push({
                         type: 'Feature',
-                        geometry: { type: 'Point', coordinates: [geom.coordinates[0], geom.coordinates[1]] },
+                        geometry: { type: 'Point', coordinates: [geom.x, geom.y] },
                         properties: {
                             id: "J" + p.objectid,
                             delay: delay,
                             traction: p.typ === "trolejbus" ? "TROLLEYBUS" : "BUS",
                             text: p.linka,
-                            lng: geom.coordinates[0],
-                            lat: geom.coordinates[1],
+                            lng: geom.x,
+                            lat: geom.y,
                             iconId: getVehicleIcon(delayClass, shortLine, false, false),
                             finalStopName: p.konecna || "",
                             shortLine: shortLine,
