@@ -8,12 +8,10 @@ let rtInterval = null;
 let initialLoadAutoClickDone = false; 
 let isFetchingVehicles = false; 
 
-// Pole pro uložení jedné nebo vícero linek z URL
 let activeRouteGroups = [];
 
 const urlParams = new URLSearchParams(window.location.search);
 
-// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -56,6 +54,42 @@ async function getStationNameByUIC(uic) {
     return uic;
 }
 
+// --- INTEGROVANÝ PROXY ROTÁTOR ---
+// Funkce zkusí stáhnout data postupně přes různé proxy servery. Když jeden selže, zkusí automaticky další.
+const proxyServers = [
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url) => `https://thingproxy.freeboard.io/fetch/${url}`
+];
+
+async function fetchWithFallback(url) {
+    for (let proxy of proxyServers) {
+        try {
+            const proxyUrl = proxy(url);
+            const res = await fetch(proxyUrl);
+            if (res.ok) {
+                // Rychlá kontrola pro Jihlavu (aby nám CodeTabs neposlal HTML chybu místo dat)
+                const contentType = res.headers.get("content-type");
+                if (contentType && contentType.indexOf("text/html") !== -1 && url.includes("geojson")) {
+                    throw new Error("Proxy vrátila HTML místo JSONu (např. chyba ArcGIS).");
+                }
+                return await res.json();
+            }
+        } catch (e) {
+            console.warn(`Proxy ${proxy(url)} selhala:`, e);
+            // Pokračuje na další proxy v poli
+        }
+    }
+    throw new Error(`Všechny proxy servery selhaly pro URL: ${url}`);
+}
+
+async function fetchKrajskeHtml(url) {
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+    const res = await fetch(proxyUrl);
+    if (!res.ok) throw new Error("Chyba při stahování HTML");
+    return await res.text();
+}
+
 // --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
 const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = new maplibregl.Map({
@@ -77,13 +111,6 @@ const map = new maplibregl.Map({
     maxZoom: initialMaxZoom
 });
 
-async function fetchKrajskeHtml(url) {
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-    const res = await fetch(proxyUrl);
-    if (!res.ok) throw new Error("Chyba při stahování HTML");
-    return await res.text();
-}
-
 function fixCommasInHtml(htmlString) {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = htmlString;
@@ -101,9 +128,7 @@ function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
         if (el && el.textContent) {
             const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            if (txt.includes('bezbari')) {
-                el.remove();
-            }
+            if (txt.includes('bezbari')) el.remove();
         }
     });
 }
@@ -210,7 +235,6 @@ function updateURL() {
 map.on('moveend', updateURL);
 map.on('zoomend', updateURL);
 
-// --- 2. VYKRESLOVÁNÍ GRAFIKY ROVNOU DO PAMĚTI KARTY ---
 const PIXEL_RATIO = 2; 
 
 function getBadgeIcon(group, color) {
@@ -319,13 +343,10 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
-    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) {
-        console.warn("spoje.json nenalezen", e);
-    }
+    } catch (e) { console.warn("spoje.json nenalezen", e); }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -655,7 +676,7 @@ async function handleVehicleClick(v) {
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
-        // Zde je čistý design přesně napodobující Krajské okno
+        // Identický design jako kraj, bez nadpisu, decentní footer
         let html = `
             <div>
                 <table style="width: 100%; border-spacing: 0; line-height: 1.6; text-align: left;">
@@ -990,15 +1011,15 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // Jihlava přes bezplatný a spolehlivý CodeTabs (zvládá GeoJSON beze ztrát)
-        const jihlavaUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
+        // Jihlava běží přes chytrý fallback
+        const jihlavaUrl = 'https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson';
         
-        // Krajské body přes rychlé corsproxy.io
-        const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
+        // Krajské API natvrdo přes nejrychlejší CORS proxy
+        const vdvUrl = `https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=${timestamp}`;
         
         const [vdvRes, jihRes] = await Promise.allSettled([
-            fetch(vdvUrl).then(r => r.json()),
-            fetch(jihlavaUrl).then(r => r.json())
+            fetchWithFallback(vdvUrl),
+            fetchWithFallback(jihlavaUrl)
         ]);
         
         let allVehicles = [];
