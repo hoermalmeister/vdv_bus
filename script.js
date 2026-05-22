@@ -78,7 +78,6 @@ const map = new maplibregl.Map({
 });
 
 async function fetchKrajskeHtml(url) {
-    // Pro Krajské API se vracíme k bleskovému corsproxy.io
     const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
     if (!res.ok) throw new Error("Chyba při stahování HTML");
@@ -552,7 +551,7 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE PRO VDV) ---
 let cachedVehicleId = null;
 let cachedInfoRaw = null;
 let cachedTimetableRaw = null;
@@ -648,6 +647,7 @@ async function handleVehicleClick(v) {
 
     const isJihlava = v.isJihlava === true || v.isJihlava === 'true';
 
+    // === Jihlava detail ===
     if (isJihlava) {
         map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
@@ -655,7 +655,7 @@ async function handleVehicleClick(v) {
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
-        // Vygenerování tabulky přesně ve vizuálním stylu Kraje bez zbytečných nadpisů
+        // Zde je čistý design přesně napodobující Krajské okno
         let html = `
             <div>
                 <table style="width: 100%; border-spacing: 0; line-height: 1.6; text-align: left;">
@@ -686,6 +686,7 @@ async function handleVehicleClick(v) {
         return;
     }
 
+    // === Kraj detail ===
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
@@ -989,9 +990,10 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // Jihlava zůstává na allorigins (corsproxy.io blokuje GeoJSON zadarmo)
-        const jihlavaUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
-        // Krajské body vráceny zpět na rychlé corsproxy.io
+        // Jihlava přes bezplatný a spolehlivý CodeTabs (zvládá GeoJSON beze ztrát)
+        const jihlavaUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=geojson')}`;
+        
+        // Krajské body přes rychlé corsproxy.io
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
         const [vdvRes, jihRes] = await Promise.allSettled([
