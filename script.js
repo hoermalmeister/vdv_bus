@@ -320,7 +320,9 @@ map.on('load', async () => {
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) { console.warn("spoje.json nenalezen", e); }
+    } catch (e) {
+        console.warn("spoje.json nenalezen", e);
+    }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -653,15 +655,15 @@ async function handleVehicleClick(v) {
         let formattedStopName = (v.finalStopName || "").replace(/,(?=[^\s])/g, ', ');
         let formattedLastStop = (v.lastStop || "").replace(/,(?=[^\s])/g, ', ');
         
-        // Zcela stejný design včetně tříd Bulmy
+        // Zcela stejný design včetně zrušení bold pro linku/směr a přehození pořadí
         let html = `
             <div>
                 <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
                     <tbody>
-                        <tr><th style="white-space: nowrap;">Linka</th><td><strong>${v.text}</strong></td></tr>
-                        <tr><th style="white-space: nowrap;">Směr</th><td><strong>${formattedStopName}</strong></td></tr>
-                        <tr><th style="white-space: nowrap;">Poslední zastávka</th><td>${formattedLastStop}</td></tr>
+                        <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.text}</td></tr>
+                        <tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${formattedStopName}</td></tr>
                         <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
+                        <tr><th style="white-space: nowrap;">Zastávka</th><td>${formattedLastStop}</td></tr>
                     </tbody>
                 </table>
                 <div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Jihlava</div>
@@ -828,7 +830,7 @@ async function handleVehicleClick(v) {
             });
             if (targetTr) {
                 const newTr = document.createElement('tr');
-                newTr.innerHTML = `<th style="white-space: nowrap;">Směr</th><td><strong>${formattedStopName}</strong></td>`;
+                newTr.innerHTML = `<th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${formattedStopName}</td>`;
                 targetTr.after(newTr);
             }
         }
@@ -884,9 +886,18 @@ async function handleVehicleClick(v) {
             });
         }
 
+        // Zabránění zalamování prvního sloupce v Detailu vozidla a zrušení tučného písma u Linky
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
+            }
+            const txt = tr.firstElementChild ? tr.firstElementChild.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim() : "";
+            if (txt === 'linka' || txt === 'vlak' || txt === 'linka:' || txt === 'vlak:') {
+                const valueCell = tr.children[1];
+                if (valueCell) {
+                    valueCell.style.fontWeight = 'normal';
+                    valueCell.querySelectorAll('b, strong').forEach(b => b.style.fontWeight = 'normal');
+                }
             }
         });
 
@@ -988,7 +999,7 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=json')}`;
+        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=1=1&returnGeometry=true&outFields=*&f=json')}`;
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
         const [vdvRes, jihRes] = await Promise.allSettled([
