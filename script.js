@@ -101,7 +101,9 @@ function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
         if (el && el.textContent) {
             const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            if (txt.includes('bezbari')) el.remove();
+            if (txt.includes('bezbari')) {
+                el.remove();
+            }
         }
     });
 }
@@ -316,10 +318,13 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
+    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) { console.warn("spoje.json nenalezen", e); }
+    } catch (e) {
+        console.warn("spoje.json nenalezen", e);
+    }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -649,7 +654,6 @@ async function handleVehicleClick(v) {
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
-        // Zde je čistý design přesně napodobující Krajské okno
         let html = `
             <div>
                 <table style="width: 100%; border-spacing: 0; line-height: 1.6; text-align: left;">
@@ -984,7 +988,7 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // ZMĚNA: Dotaz na Jihlavu pro formát &f=json (který corsproxy plně propouští)
+        // ZMĚNA: Dotaz na Jihlavu přes &f=json a bleskový corsproxy.io
         const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=json')}`;
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
@@ -1039,16 +1043,18 @@ async function fetchLiveVehicles() {
             });
         }
         
-        // Zpracování ArcGIS JSON formátu
+        // Zpracování čistého ArcGIS JSONu (ignorování S-JTSK geometrie, použití latitude/longitude)
         if (jihRes.status === 'fulfilled') {
             const jihData = jihRes.value;
             if (jihData.features) {
                 jihData.features.forEach(f => {
-                    // Ve standardním JSON od ArcGIS to nejsou properties, ale attributes
-                    const p = f.attributes;
-                    const geom = f.geometry;
-                    // ArcGIS formát vrací .x a .y
-                    if (!geom || geom.x == null || geom.y == null) return; 
+                    const p = f.attributes || f.properties; 
+                    if (!p) return;
+
+                    const lng = p.longitude;
+                    const lat = p.latitude;
+
+                    if (typeof lng !== 'number' || typeof lat !== 'number' || (lng === 0 && lat === 0)) return;
                     
                     const shortLine = String(p.linka).trim();
                     
@@ -1067,14 +1073,14 @@ async function fetchLiveVehicles() {
 
                     allVehicles.push({
                         type: 'Feature',
-                        geometry: { type: 'Point', coordinates: [geom.x, geom.y] },
+                        geometry: { type: 'Point', coordinates: [lng, lat] },
                         properties: {
                             id: "J" + p.objectid,
                             delay: delay,
                             traction: p.typ === "trolejbus" ? "TROLLEYBUS" : "BUS",
                             text: p.linka,
-                            lng: geom.x,
-                            lat: geom.y,
+                            lng: lng,
+                            lat: lat,
                             iconId: getVehicleIcon(delayClass, shortLine, false, false),
                             finalStopName: p.konecna || "",
                             shortLine: shortLine,
