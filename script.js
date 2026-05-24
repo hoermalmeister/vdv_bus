@@ -101,9 +101,7 @@ function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
         if (el && el.textContent) {
             const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            if (txt.includes('bezbari')) {
-                el.remove();
-            }
+            if (txt.includes('bezbari')) el.remove();
         }
     });
 }
@@ -322,9 +320,7 @@ map.on('load', async () => {
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) {
-        console.warn("spoje.json nenalezen", e);
-    }
+    } catch (e) { console.warn("spoje.json nenalezen", e); }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -595,7 +591,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
                 let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
-                let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Na čas');
+                let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Bez zpoždění');
                 const delaySpan = document.createElement('span');
                 delaySpan.style.marginLeft = "15px";
                 delaySpan.innerHTML = `Zpoždění: <b style="color:${delayClass}">${delayText}</b>`;
@@ -651,17 +647,21 @@ async function handleVehicleClick(v) {
         map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
-        let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
+        let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
+        let formattedStopName = (v.finalStopName || "").replace(/,(?=[^\s])/g, ', ');
+        let formattedLastStop = (v.lastStop || "").replace(/,(?=[^\s])/g, ', ');
+        
+        // Zcela stejný design včetně tříd Bulmy
         let html = `
             <div>
-                <table style="width: 100%; border-spacing: 0; line-height: 1.6; text-align: left;">
+                <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
                     <tbody>
-                        <tr><th style="padding-right: 10px; white-space: nowrap;">Linka:</th><td><strong>${v.text}</strong></td></tr>
-                        <tr><th style="padding-right: 10px; white-space: nowrap;">Směr:</th><td><strong>${v.finalStopName}</strong></td></tr>
-                        <tr><th style="padding-right: 10px; white-space: nowrap;">Poslední zastávka:</th><td>${v.lastStop}</td></tr>
-                        <tr><th style="padding-right: 10px; white-space: nowrap;">Zpoždění:</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
+                        <tr><th style="white-space: nowrap;">Linka</th><td><strong>${v.text}</strong></td></tr>
+                        <tr><th style="white-space: nowrap;">Směr</th><td><strong>${formattedStopName}</strong></td></tr>
+                        <tr><th style="white-space: nowrap;">Poslední zastávka</th><td>${formattedLastStop}</td></tr>
+                        <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
                     </tbody>
                 </table>
                 <div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Jihlava</div>
@@ -828,7 +828,7 @@ async function handleVehicleClick(v) {
             });
             if (targetTr) {
                 const newTr = document.createElement('tr');
-                newTr.innerHTML = `<th>Směr:</th><td><strong>${formattedStopName}</strong></td>`;
+                newTr.innerHTML = `<th style="white-space: nowrap;">Směr</th><td><strong>${formattedStopName}</strong></td>`;
                 targetTr.after(newTr);
             }
         }
@@ -843,9 +843,9 @@ async function handleVehicleClick(v) {
             });
             if (targetTr) {
                 let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
-                let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Na čas');
+                let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
                 const newTr = document.createElement('tr');
-                newTr.innerHTML = `<th>Zpoždění:</th><td><b style="color:${delayClass}">${delayText}</b></td>`;
+                newTr.innerHTML = `<th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td>`;
                 targetTr.after(newTr);
             }
         }
@@ -988,7 +988,6 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // ZMĚNA: Dotaz na Jihlavu přes &f=json a bleskový corsproxy.io
         const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/47/query?where=1=1&returnGeometry=true&outFields=*&f=json')}`;
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
@@ -1002,7 +1001,9 @@ async function fetchLiveVehicles() {
         if (vdvRes.status === 'fulfilled') {
             const vdvData = vdvRes.value;
             vdvData.forEach(v => {
-                if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return;
+                const lng = parseFloat(v.lng);
+                const lat = parseFloat(v.lat);
+                if (isNaN(lng) || isNaN(lat) || (lng < 1 && lat < 1)) return;
 
                 const isTrain = v.traction === 'TRAIN';
                 const vTextStr = String(v.text || '');
@@ -1015,16 +1016,24 @@ async function fetchLiveVehicles() {
                     if (!trainMatch && !busMatch) return;
                 }
                 
-                const isUnknownDelay = v.delay === -2147483648;
+                let d = v.delay;
+                if (d === null || d === undefined || (typeof d === 'string' && d.toLowerCase().includes('bez'))) {
+                    d = 0;
+                } else {
+                    d = parseInt(d, 10);
+                }
+                if (isNaN(d)) d = -2147483648;
+
+                const isUnknownDelay = d === -2147483648;
                 const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
                 if (isUnknownDelay && hasNaDirection && !isTrain) return;
                 
                 const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
                 
                 let delayClass = 'ok';
-                if (v.delay === -2147483648) delayClass = 'unknown';
-                else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
-                else if (v.delay >= 10) delayClass = 'alert';
+                if (d === -2147483648) delayClass = 'unknown';
+                else if (d > 2 && d <= 9) delayClass = 'warn'; 
+                else if (d >= 10) delayClass = 'alert';
 
                 if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
                     delayClass = 'dim'; 
@@ -1032,9 +1041,9 @@ async function fetchLiveVehicles() {
 
                 allVehicles.push({
                     type: 'Feature',
-                    geometry: { type: 'Point', coordinates: [v.lng, v.lat] },
+                    geometry: { type: 'Point', coordinates: [lng, lat] },
                     properties: {
-                        id: String(v.id), delay: v.delay, traction: v.traction, text: vTextStr, lng: v.lng, lat: v.lat,
+                        id: String(v.id), delay: d, traction: v.traction, text: vTextStr, lng: lng, lat: lat,
                         iconId: getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV), 
                         finalStopName: v.finalStopName || "", shortLine: shortLine,
                         isJihlava: false, isTrain: isTrain, isNonVDV: isNonVDV
@@ -1043,7 +1052,6 @@ async function fetchLiveVehicles() {
             });
         }
         
-        // Zpracování čistého ArcGIS JSONu (ignorování S-JTSK geometrie, použití latitude/longitude)
         if (jihRes.status === 'fulfilled') {
             const jihData = jihRes.value;
             if (jihData.features) {
@@ -1051,10 +1059,9 @@ async function fetchLiveVehicles() {
                     const p = f.attributes || f.properties; 
                     if (!p) return;
 
-                    const lng = p.longitude;
-                    const lat = p.latitude;
-
-                    if (typeof lng !== 'number' || typeof lat !== 'number' || (lng === 0 && lat === 0)) return;
+                    const lng = parseFloat(p.longitude);
+                    const lat = parseFloat(p.latitude);
+                    if (isNaN(lng) || isNaN(lat) || (lng < 1 && lat < 1)) return;
                     
                     const shortLine = String(p.linka).trim();
                     
@@ -1062,7 +1069,12 @@ async function fetchLiveVehicles() {
                         if (!activeRouteGroups.includes(shortLine)) return;
                     }
                     
-                    let delay = p.delayinmins != null ? p.delayinmins : -2147483648;
+                    let delay = p.delayinmins;
+                    if (delay === null || delay === undefined) {
+                        delay = 0;
+                    } else {
+                        delay = parseInt(delay, 10);
+                    }
                     
                     let delayClass = 'ok';
                     if (delay === -2147483648) delayClass = 'unknown';
@@ -1127,7 +1139,6 @@ if(locateBtn) locateBtn.addEventListener('click', () => {
     }
 });
 
-// --- 7. INTELIGENTNÍ KOMPAS (SEVERKA) ---
 const compassBtn = document.createElement('div');
 compassBtn.id = 'compass-btn';
 compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
