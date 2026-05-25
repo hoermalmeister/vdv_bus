@@ -316,13 +316,10 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
-    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
-    } catch (e) {
-        console.warn("spoje.json nenalezen", e);
-    }
+    } catch (e) { console.warn("spoje.json nenalezen", e); }
 
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
@@ -655,7 +652,6 @@ async function handleVehicleClick(v) {
         let formattedStopName = (v.finalStopName || "").replace(/,(?=[^\s])/g, ', ');
         let formattedLastStop = (v.lastStop || "").replace(/,(?=[^\s])/g, ', ');
         
-        // Zcela stejný design včetně zrušení bold pro linku/směr a přehození pořadí
         let html = `
             <div>
                 <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
@@ -886,13 +882,13 @@ async function handleVehicleClick(v) {
             });
         }
 
-        // Zabránění zalamování prvního sloupce v Detailu vozidla a zrušení tučného písma u Linky
+        // Zabránění zalamování a odstranění "bold" z Linky a Směru v tabulce z VDV
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
             }
             const txt = tr.firstElementChild ? tr.firstElementChild.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim() : "";
-            if (txt === 'linka' || txt === 'vlak' || txt === 'linka:' || txt === 'vlak:') {
+            if (txt === 'linka' || txt === 'vlak' || txt === 'linka:' || txt === 'vlak:' || txt === 'směr' || txt === 'smer' || txt === 'směr:' || txt === 'smer:') {
                 const valueCell = tr.children[1];
                 if (valueCell) {
                     valueCell.style.fontWeight = 'normal';
@@ -999,12 +995,14 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=1=1&returnGeometry=true&outFields=*&f=json')}`;
+        // ZMĚNA: Dotaz na Jihlavu s Cache-Buster hlavičkou (&_t=)
+        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=1=1&returnGeometry=true&outFields=*&f=json&_t=' + timestamp)}`;
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
+        // Přidání { cache: 'no-store' } pro bezpečné obejití chování prohlížeče/proxy
         const [vdvRes, jihRes] = await Promise.allSettled([
-            fetch(vdvUrl).then(r => r.json()),
-            fetch(jihlavaUrl).then(r => r.json())
+            fetch(vdvUrl, { cache: 'no-store' }).then(r => r.json()),
+            fetch(jihlavaUrl, { cache: 'no-store' }).then(r => r.json())
         ]);
         
         let allVehicles = [];
@@ -1012,9 +1010,7 @@ async function fetchLiveVehicles() {
         if (vdvRes.status === 'fulfilled') {
             const vdvData = vdvRes.value;
             vdvData.forEach(v => {
-                const lng = parseFloat(v.lng);
-                const lat = parseFloat(v.lat);
-                if (isNaN(lng) || isNaN(lat) || (lng < 1 && lat < 1)) return;
+                if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return;
 
                 const isTrain = v.traction === 'TRAIN';
                 const vTextStr = String(v.text || '');
@@ -1027,24 +1023,16 @@ async function fetchLiveVehicles() {
                     if (!trainMatch && !busMatch) return;
                 }
                 
-                let d = v.delay;
-                if (d === null || d === undefined || (typeof d === 'string' && d.toLowerCase().includes('bez'))) {
-                    d = 0;
-                } else {
-                    d = parseInt(d, 10);
-                }
-                if (isNaN(d)) d = -2147483648;
-
-                const isUnknownDelay = d === -2147483648;
+                const isUnknownDelay = v.delay === -2147483648;
                 const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
                 if (isUnknownDelay && hasNaDirection && !isTrain) return;
                 
                 const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
                 
                 let delayClass = 'ok';
-                if (d === -2147483648) delayClass = 'unknown';
-                else if (d > 2 && d <= 9) delayClass = 'warn'; 
-                else if (d >= 10) delayClass = 'alert';
+                if (v.delay === -2147483648) delayClass = 'unknown';
+                else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
+                else if (v.delay >= 10) delayClass = 'alert';
 
                 if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
                     delayClass = 'dim'; 
@@ -1052,9 +1040,9 @@ async function fetchLiveVehicles() {
 
                 allVehicles.push({
                     type: 'Feature',
-                    geometry: { type: 'Point', coordinates: [lng, lat] },
+                    geometry: { type: 'Point', coordinates: [v.lng, v.lat] },
                     properties: {
-                        id: String(v.id), delay: d, traction: v.traction, text: vTextStr, lng: lng, lat: lat,
+                        id: String(v.id), delay: v.delay, traction: v.traction, text: vTextStr, lng: v.lng, lat: v.lat,
                         iconId: getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV), 
                         finalStopName: v.finalStopName || "", shortLine: shortLine,
                         isJihlava: false, isTrain: isTrain, isNonVDV: isNonVDV
@@ -1150,6 +1138,7 @@ if(locateBtn) locateBtn.addEventListener('click', () => {
     }
 });
 
+// --- 7. INTELIGENTNÍ KOMPAS (SEVERKA) ---
 const compassBtn = document.createElement('div');
 compassBtn.id = 'compass-btn';
 compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
