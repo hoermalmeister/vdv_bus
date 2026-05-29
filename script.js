@@ -314,9 +314,37 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     return id;
 }
 
+// --- UNIVERZÁLNÍ CSV PARSER ---
+function parseCSVLine(text, delimiter) {
+    let ret = [], inQuotes = false, val = '';
+    for (let i = 0; i < text.length; i++) {
+        let ch = text[i];
+        if (inQuotes) {
+            if (ch === '"') {
+                if (i + 1 < text.length && text[i+1] === '"') {
+                    val += '"'; i++;
+                } else {
+                    inQuotes = false;
+                }
+            } else {
+                val += ch;
+            }
+        } else {
+            if (ch === '"') {
+                inQuotes = true;
+            } else if (ch === delimiter) {
+                ret.push(val); val = '';
+            } else {
+                val += ch;
+            }
+        }
+    }
+    ret.push(val);
+    return ret;
+}
+
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
-    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
@@ -489,35 +517,32 @@ map.on('load', async () => {
 
         // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) ---
         try {
-            // Přímé stažení z GitHub Pages (nevyžaduje CORS proxy)
-            const stopsRes = await fetch('https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?t=' + new Date().getTime());
+            const stopsUrl = `https://corsproxy.io/?${encodeURIComponent('https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime())}`;
+            const stopsRes = await fetch(stopsUrl, { cache: 'no-store' });
             if (stopsRes.ok) {
                 const stopsText = await stopsRes.text();
                 const lines = stopsText.split(/\r?\n/);
                 if (lines.length > 0) {
-                    const headers = lines[0].trim().split(',');
+                    let headerLine = lines[0].replace(/^\uFEFF/, '').trim();
+                    let delimiter = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
+                    const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().toLowerCase());
+                    
                     const latIdx = headers.indexOf('stop_lat');
                     const lonIdx = headers.indexOf('stop_lon');
                     const nameIdx = headers.indexOf('stop_name');
 
                     if (latIdx > -1 && lonIdx > -1 && nameIdx > -1) {
-                        const vdvStopsGeoJson = {
-                            type: 'FeatureCollection',
-                            features: []
-                        };
+                        const vdvStopsGeoJson = { type: 'FeatureCollection', features: [] };
                         for (let i = 1; i < lines.length; i++) {
                             const line = lines[i].trim();
                             if (!line) continue;
                             
-                            // Robustní rozdělení CSV (ignoruje čárky uvnitř uvozovek)
-                            const cols = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
-                            const lat = parseFloat(cols[latIdx]);
-                            const lon = parseFloat(cols[lonIdx]);
+                            const cols = parseCSVLine(line, delimiter);
+                            const latStr = (cols[latIdx] || '').replace(',', '.'); 
+                            const lonStr = (cols[lonIdx] || '').replace(',', '.');
+                            const lat = parseFloat(latStr);
+                            const lon = parseFloat(lonStr);
                             let name = cols[nameIdx] || "";
-                            
-                            if (name.startsWith('"') && name.endsWith('"')) {
-                                name = name.slice(1, -1).replace(/""/g, '"');
-                            }
 
                             if (!isNaN(lat) && !isNaN(lon)) {
                                 vdvStopsGeoJson.features.push({
@@ -527,6 +552,8 @@ map.on('load', async () => {
                                 });
                             }
                         }
+
+                        console.log("VDV Stops loaded:", vdvStopsGeoJson.features.length);
 
                         map.addSource('vdv-stops', { 
                             type: 'geojson', 
@@ -559,10 +586,12 @@ map.on('load', async () => {
                             },
                             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
                         });
+                    } else {
+                        console.warn("Chybějící sloupce v stops.txt:", headers);
                     }
                 }
             }
-        } catch(e) { console.warn("vdv stops.txt nenalezeno", e); }
+        } catch(e) { console.warn("vdv stops.txt nenalezeno nebo chyba parsování", e); }
 
         map.addSource('trip-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         map.addLayer({
@@ -605,7 +634,6 @@ function highlightRoute(groups) {
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
             if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-color', isRealtimeMode ? '#444444' : '#ffffff');
             
-            // Zobrazení VDV zastávek při nulovém výběru linek
             if (map.getLayer('vdv-stops-layer')) map.setLayoutProperty('vdv-stops-layer', 'visibility', 'visible');
             if (map.getLayer('vdv-stops-text-layer')) map.setLayoutProperty('vdv-stops-text-layer', 'visibility', 'visible');
         } else {
@@ -629,7 +657,6 @@ function highlightRoute(groups) {
                 map.setPaintProperty('zeleznice-layer', 'line-color', activeRouteGroups.includes('000') ? '#ffffff' : '#444444');
             }
 
-            // Skrytí VDV zastávek pokud je vybraná konkrétní linka
             if (map.getLayer('vdv-stops-layer')) map.setLayoutProperty('vdv-stops-layer', 'visibility', 'none');
             if (map.getLayer('vdv-stops-text-layer')) map.setLayoutProperty('vdv-stops-text-layer', 'visibility', 'none');
         }
