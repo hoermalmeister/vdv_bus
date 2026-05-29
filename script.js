@@ -408,43 +408,6 @@ map.on('load', async () => {
     try {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
         geojsonData = await res.json();
-        
-        try {
-            const jihRoutesUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/5/query?where=objectid>0&returnGeometry=true&outFields=linka&outSR=4326&f=json')}`;
-            const resJihRoutes = await fetch(jihRoutesUrl);
-            if (resJihRoutes.ok) {
-                const jData = await resJihRoutes.json();
-                if (jData.features) {
-                    const jihlavaColors = {
-                        'A': '#ff9e81', 'B': '#f984a1', 'C': '#ff0042', 'D': '#ff00bb', 'E': '#a600e2', 'F': '#de003a',
-                        '10': '#00fe7e', '12': '#04914c', '3': '#5cb78c', '31': '#8cde70', '32': '#8cde70',
-                        '4': '#f38af2', '41': '#c20499', '42': '#740468', '5': '#dbdc05', '7': '#c0fd09',
-                        '8': '#3cfe00', '9': '#006100', 'N': '#555555'
-                    };
-                    jData.features.forEach(f => {
-                        if (f.attributes && f.attributes.linka && f.geometry && f.geometry.paths) {
-                            
-                            const firstPt = f.geometry.paths[0][0];
-                            if (firstPt && (Math.abs(firstPt[0]) > 180 || Math.abs(firstPt[1]) > 90)) {
-                                return;
-                            }
-
-                            const shortLine = String(f.attributes.linka).replace('Linka ', '').trim();
-                            geojsonData.features.push({
-                                type: 'Feature',
-                                geometry: { type: 'MultiLineString', coordinates: f.geometry.paths },
-                                properties: {
-                                    group: shortLine,
-                                    color: jihlavaColors[shortLine] || '#e74c3c',
-                                    type: 'line', 
-                                    isJihlava: true
-                                }
-                            });
-                        }
-                    });
-                }
-            }
-        } catch(e) { console.warn("Jihlava trasy nenalezeny", e); }
 
         geojsonData.features.forEach(f => {
             if (f.geometry.type === 'Point' && f.properties.type === 'stop') {
@@ -460,6 +423,7 @@ map.on('load', async () => {
             }
         });
 
+        // Tolerance a maxzoom pomáhají předejít mizení malých detailů blízko u sebe
         map.addSource('trasy', { 
             type: 'geojson', 
             data: geojsonData,
@@ -517,15 +481,18 @@ map.on('load', async () => {
 
         // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) ---
         try {
-            const stopsUrl = `https://corsproxy.io/?${encodeURIComponent('https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime())}`;
+            // Bez proxy - GitHub má povolený CORS
+            const stopsUrl = 'https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime();
             const stopsRes = await fetch(stopsUrl, { cache: 'no-store' });
             if (stopsRes.ok) {
                 const stopsText = await stopsRes.text();
                 const lines = stopsText.split(/\r?\n/);
                 if (lines.length > 0) {
-                    let headerLine = lines[0].replace(/^\uFEFF/, '').trim();
+                    let headerLine = lines[0].replace(/^\uFEFF/, '').trim(); // Očištění BOM
                     let delimiter = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
-                    const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().toLowerCase());
+                    
+                    // Očištění hlaviček od uvozovek pro spolehlivější parsování
+                    const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().toLowerCase().replace(/^"|"$/g, ''));
                     
                     const latIdx = headers.indexOf('stop_lat');
                     const lonIdx = headers.indexOf('stop_lon');
@@ -543,8 +510,9 @@ map.on('load', async () => {
                             const lat = parseFloat(latStr);
                             const lon = parseFloat(lonStr);
                             let name = cols[nameIdx] || "";
-
-                            if (!isNaN(lat) && !isNaN(lon)) {
+                            
+                            // 🛡️ SANITIZER: Povolit pouze absolutně bezchybné body 
+                            if (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
                                 vdvStopsGeoJson.features.push({
                                     type: 'Feature',
                                     geometry: { type: 'Point', coordinates: [lon, lat] },
@@ -553,7 +521,7 @@ map.on('load', async () => {
                             }
                         }
 
-                        console.log("VDV Stops loaded:", vdvStopsGeoJson.features.length);
+                        console.log(`VDV Zastávky úspěšně načteny a profiltrovány. Celkem platných: ${vdvStopsGeoJson.features.length}`);
 
                         map.addSource('vdv-stops', { 
                             type: 'geojson', 
