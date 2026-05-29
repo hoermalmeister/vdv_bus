@@ -62,7 +62,6 @@ const map = new maplibregl.Map({
     container: 'map',
     style: {
         version: 8,
-        // ZMĚNA ZDE: Použití funkčních demotiles fontů od MapLibre místo mrtvého OpenMapTiles serveru!
         glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
         sources: {
             'carto-dark': {
@@ -424,7 +423,6 @@ map.on('load', async () => {
             }
         });
 
-        // Tolerance a maxzoom pomáhají předejít mizení malých detailů blízko u sebe
         map.addSource('trasy', { 
             type: 'geojson', 
             data: geojsonData,
@@ -480,24 +478,23 @@ map.on('load', async () => {
             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
         });
 
-        // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) ---
+        // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) VČETNĚ ZÓN ---
         try {
-            // Bez proxy - GitHub má povolený CORS
             const stopsUrl = 'https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime();
             const stopsRes = await fetch(stopsUrl, { cache: 'no-store' });
             if (stopsRes.ok) {
                 const stopsText = await stopsRes.text();
                 const lines = stopsText.split(/\r?\n/);
                 if (lines.length > 0) {
-                    let headerLine = lines[0].replace(/^\uFEFF/, '').trim(); // Očištění BOM
+                    let headerLine = lines[0].replace(/^\uFEFF/, '').trim(); 
                     let delimiter = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
                     
-                    // Očištění hlaviček od uvozovek pro spolehlivější parsování
                     const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().toLowerCase().replace(/^"|"$/g, ''));
                     
                     const latIdx = headers.indexOf('stop_lat');
                     const lonIdx = headers.indexOf('stop_lon');
                     const nameIdx = headers.indexOf('stop_name');
+                    const zoneIdx = headers.indexOf('zone_id'); // Vyhledání sloupce se zónou
 
                     if (latIdx > -1 && lonIdx > -1 && nameIdx > -1) {
                         const vdvStopsGeoJson = { type: 'FeatureCollection', features: [] };
@@ -512,17 +509,25 @@ map.on('load', async () => {
                             const lon = parseFloat(lonStr);
                             let name = cols[nameIdx] || "";
                             
-                            // 🛡️ SANITIZER: Povolit pouze absolutně bezchybné body 
+                            // Vytažení a zformátování zóny, pokud existuje
+                            let zoneStr = zoneIdx > -1 ? (cols[zoneIdx] || "").trim().replace(/^"|"$/g, '') : "";
+                            let displayName = name;
+                            if (zoneStr) {
+                                displayName += `\n(Zóna ${zoneStr})`;
+                            }
+                            
                             if (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
                                 vdvStopsGeoJson.features.push({
                                     type: 'Feature',
                                     geometry: { type: 'Point', coordinates: [lon, lat] },
-                                    properties: { name: name }
+                                    properties: { 
+                                        name: displayName, 
+                                        rawName: name,
+                                        zone: zoneStr
+                                    }
                                 });
                             }
                         }
-
-                        console.log(`VDV Zastávky úspěšně načteny a profiltrovány. Celkem platných: ${vdvStopsGeoJson.features.length}`);
 
                         map.addSource('vdv-stops', { 
                             type: 'geojson', 
@@ -532,13 +537,19 @@ map.on('load', async () => {
 
                         const visibility = activeRouteGroups.length === 0 ? 'visible' : 'none';
 
+                        // Vizuální vylepšení zastávek (Bílé jádro, fialový okraj)
                         map.addLayer({
                             id: 'vdv-stops-layer',
                             type: 'circle',
                             source: 'vdv-stops',
                             minzoom: 15,
                             layout: { 'visibility': visibility },
-                            paint: { 'circle-radius': 4, 'circle-color': '#58d68d', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 }
+                            paint: { 
+                                'circle-radius': 5, 
+                                'circle-color': '#ffffff', 
+                                'circle-stroke-color': '#9b59b6', 
+                                'circle-stroke-width': 2 
+                            }
                         });
 
                         map.addLayer({
@@ -551,12 +562,10 @@ map.on('load', async () => {
                                 'text-field': ['get', 'name'],
                                 'text-size': 12,
                                 'text-anchor': 'bottom',
-                                'text-offset': [0, -0.6]
+                                'text-offset': [0, -0.8] // Mírně zvednuto kvůli větší ikoně a dvěma řádkům
                             },
                             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
                         });
-                    } else {
-                        console.warn("Chybějící sloupce v stops.txt:", headers);
                     }
                 }
             }
@@ -765,7 +774,6 @@ async function handleVehicleClick(v) {
 
     const isJihlava = v.isJihlava === true || v.isJihlava === 'true';
 
-    // === Jihlava detail ===
     if (isJihlava) {
         let multiLineCoords = [];
         if (geojsonData) {
@@ -823,7 +831,6 @@ async function handleVehicleClick(v) {
         return;
     }
 
-    // === Kraj detail ===
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
