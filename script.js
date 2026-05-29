@@ -62,7 +62,8 @@ const map = new maplibregl.Map({
     container: 'map',
     style: {
         version: 8,
-        glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
+        // ZMĚNA ZDE: Použití funkčních demotiles fontů od MapLibre místo mrtvého OpenMapTiles serveru!
+        glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
         sources: {
             'carto-dark': {
                 type: 'raster',
