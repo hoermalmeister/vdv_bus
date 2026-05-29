@@ -316,6 +316,7 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
 
 // --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
+    
     try {
         const r = await fetch('spoje.json?t=' + new Date().getTime());
         if (r.ok) tripShapes = await r.json();
@@ -380,6 +381,45 @@ map.on('load', async () => {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
         geojsonData = await res.json();
         
+        try {
+            const jihRoutesUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/5/query?where=objectid>0&returnGeometry=true&outFields=linka&outSR=4326&f=json')}`;
+            const resJihRoutes = await fetch(jihRoutesUrl);
+            if (resJihRoutes.ok) {
+                const jData = await resJihRoutes.json();
+                if (jData.features) {
+                    const jihlavaColors = {
+                        'A': '#ff9e81', 'B': '#f984a1', 'C': '#ff0042', 'D': '#ff00bb', 'E': '#a600e2', 'F': '#de003a',
+                        '10': '#00fe7e', '12': '#04914c', '3': '#5cb78c', '31': '#8cde70', '32': '#8cde70',
+                        '4': '#f38af2', '41': '#c20499', '42': '#740468', '5': '#dbdc05', '7': '#c0fd09',
+                        '8': '#3cfe00', '9': '#006100', 'N': '#555555'
+                    };
+                    jData.features.forEach(f => {
+                        if (f.attributes && f.attributes.linka && f.geometry && f.geometry.paths) {
+                            
+                            // BEZPEČNOSTNÍ ŠTÍT: Ignorovat obří katastrální S-JTSK souřadnice z Jihlavy!
+                            // Ochráníme tak Bounding Box mapy a zabráníme mizení zastávek.
+                            const firstPt = f.geometry.paths[0][0];
+                            if (firstPt && (Math.abs(firstPt[0]) > 180 || Math.abs(firstPt[1]) > 90)) {
+                                return; // Přeskočíme invalidní trasu
+                            }
+
+                            const shortLine = String(f.attributes.linka).replace('Linka ', '').trim();
+                            geojsonData.features.push({
+                                type: 'Feature',
+                                geometry: { type: 'MultiLineString', coordinates: f.geometry.paths },
+                                properties: {
+                                    group: shortLine,
+                                    color: jihlavaColors[shortLine] || '#e74c3c',
+                                    type: 'line', 
+                                    isJihlava: true
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+        } catch(e) { console.warn("Jihlava trasy nenalezeny", e); }
+
         geojsonData.features.forEach(f => {
             if (f.geometry.type === 'Point' && f.properties.type === 'stop') {
                 allStops.push({
@@ -394,7 +434,13 @@ map.on('load', async () => {
             }
         });
 
-        map.addSource('trasy', { type: 'geojson', data: geojsonData });
+        // Přidání maxzoom a tolerance zabrání ztrácení menších detailů jako jsou zastávky při extrémním přiblížení
+        map.addSource('trasy', { 
+            type: 'geojson', 
+            data: geojsonData,
+            maxzoom: 20,
+            tolerance: 0.5
+        });
 
         map.addLayer({
             id: 'lines-layer',
@@ -643,7 +689,24 @@ async function handleVehicleClick(v) {
 
     // === Jihlava detail ===
     if (isJihlava) {
-        map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+        let multiLineCoords = [];
+        if (geojsonData) {
+            geojsonData.features.forEach(f => {
+                if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === String(v.shortLine)) {
+                    if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
+                    else multiLineCoords.push(...f.geometry.coordinates);
+                }
+            });
+        }
+
+        if (multiLineCoords.length > 0) {
+            map.getSource('trip-route').setData({
+                type: 'Feature',
+                geometry: { type: 'MultiLineString', coordinates: multiLineCoords }
+            });
+        } else {
+            map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+        }
         
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
@@ -882,7 +945,6 @@ async function handleVehicleClick(v) {
             });
         }
 
-        // Zabránění zalamování a odstranění "bold" z Linky a Směru v tabulce z VDV
         tempDiv.querySelectorAll('tr').forEach(tr => {
             if (tr.firstElementChild) {
                 tr.firstElementChild.style.whiteSpace = 'nowrap';
@@ -995,11 +1057,9 @@ async function fetchLiveVehicles() {
     try {
         const timestamp = new Date().getTime();
         
-        // ZMĚNA: Dotaz na Jihlavu s Cache-Buster hlavičkou (&_t=)
-        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=1=1&returnGeometry=true&outFields=*&f=json&_t=' + timestamp)}`;
+        const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=objectid>0&outFields=*&f=json&_t=' + timestamp)}`;
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
         
-        // Přidání { cache: 'no-store' } pro bezpečné obejití chování prohlížeče/proxy
         const [vdvRes, jihRes] = await Promise.allSettled([
             fetch(vdvUrl, { cache: 'no-store' }).then(r => r.json()),
             fetch(jihlavaUrl, { cache: 'no-store' }).then(r => r.json())
@@ -1010,7 +1070,9 @@ async function fetchLiveVehicles() {
         if (vdvRes.status === 'fulfilled') {
             const vdvData = vdvRes.value;
             vdvData.forEach(v => {
-                if (typeof v.lng !== 'number' || typeof v.lat !== 'number' || (v.lng === 0 && v.lat === 0)) return;
+                const lng = parseFloat(v.lng);
+                const lat = parseFloat(v.lat);
+                if (isNaN(lng) || isNaN(lat) || (lng < 1 && lat < 1)) return;
 
                 const isTrain = v.traction === 'TRAIN';
                 const vTextStr = String(v.text || '');
@@ -1023,16 +1085,24 @@ async function fetchLiveVehicles() {
                     if (!trainMatch && !busMatch) return;
                 }
                 
-                const isUnknownDelay = v.delay === -2147483648;
+                let d = v.delay;
+                if (d === null || d === undefined || (typeof d === 'string' && d.toLowerCase().includes('bez'))) {
+                    d = 0;
+                } else {
+                    d = parseInt(d, 10);
+                }
+                if (isNaN(d)) d = -2147483648;
+
+                const isUnknownDelay = d === -2147483648;
                 const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
                 if (isUnknownDelay && hasNaDirection && !isTrain) return;
                 
                 const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
                 
                 let delayClass = 'ok';
-                if (v.delay === -2147483648) delayClass = 'unknown';
-                else if (v.delay > 2 && v.delay <= 9) delayClass = 'warn'; 
-                else if (v.delay >= 10) delayClass = 'alert';
+                if (d === -2147483648) delayClass = 'unknown';
+                else if (d > 2 && d <= 9) delayClass = 'warn'; 
+                else if (d >= 10) delayClass = 'alert';
 
                 if (!isTrain && shortLine !== "??" && shortLine.length <= 2) {
                     delayClass = 'dim'; 
@@ -1040,9 +1110,9 @@ async function fetchLiveVehicles() {
 
                 allVehicles.push({
                     type: 'Feature',
-                    geometry: { type: 'Point', coordinates: [v.lng, v.lat] },
+                    geometry: { type: 'Point', coordinates: [lng, lat] },
                     properties: {
-                        id: String(v.id), delay: v.delay, traction: v.traction, text: vTextStr, lng: v.lng, lat: v.lat,
+                        id: String(v.id), delay: d, traction: v.traction, text: vTextStr, lng: lng, lat: lat,
                         iconId: getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV), 
                         finalStopName: v.finalStopName || "", shortLine: shortLine,
                         isJihlava: false, isTrain: isTrain, isNonVDV: isNonVDV
@@ -1138,7 +1208,6 @@ if(locateBtn) locateBtn.addEventListener('click', () => {
     }
 });
 
-// --- 7. INTELIGENTNÍ KOMPAS (SEVERKA) ---
 const compassBtn = document.createElement('div');
 compassBtn.id = 'compass-btn';
 compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
