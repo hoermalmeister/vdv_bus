@@ -396,11 +396,9 @@ map.on('load', async () => {
                     jData.features.forEach(f => {
                         if (f.attributes && f.attributes.linka && f.geometry && f.geometry.paths) {
                             
-                            // BEZPEČNOSTNÍ ŠTÍT: Ignorovat obří katastrální S-JTSK souřadnice z Jihlavy!
-                            // Ochráníme tak Bounding Box mapy a zabráníme mizení zastávek.
                             const firstPt = f.geometry.paths[0][0];
                             if (firstPt && (Math.abs(firstPt[0]) > 180 || Math.abs(firstPt[1]) > 90)) {
-                                return; // Přeskočíme invalidní trasu
+                                return;
                             }
 
                             const shortLine = String(f.attributes.linka).replace('Linka ', '').trim();
@@ -434,7 +432,6 @@ map.on('load', async () => {
             }
         });
 
-        // Přidání maxzoom a tolerance zabrání ztrácení menších detailů jako jsou zastávky při extrémním přiblížení
         map.addSource('trasy', { 
             type: 'geojson', 
             data: geojsonData,
@@ -490,6 +487,83 @@ map.on('load', async () => {
             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
         });
 
+        // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) ---
+        try {
+            // Přímé stažení z GitHub Pages (nevyžaduje CORS proxy)
+            const stopsRes = await fetch('https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?t=' + new Date().getTime());
+            if (stopsRes.ok) {
+                const stopsText = await stopsRes.text();
+                const lines = stopsText.split(/\r?\n/);
+                if (lines.length > 0) {
+                    const headers = lines[0].trim().split(',');
+                    const latIdx = headers.indexOf('stop_lat');
+                    const lonIdx = headers.indexOf('stop_lon');
+                    const nameIdx = headers.indexOf('stop_name');
+
+                    if (latIdx > -1 && lonIdx > -1 && nameIdx > -1) {
+                        const vdvStopsGeoJson = {
+                            type: 'FeatureCollection',
+                            features: []
+                        };
+                        for (let i = 1; i < lines.length; i++) {
+                            const line = lines[i].trim();
+                            if (!line) continue;
+                            
+                            // Robustní rozdělení CSV (ignoruje čárky uvnitř uvozovek)
+                            const cols = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+                            const lat = parseFloat(cols[latIdx]);
+                            const lon = parseFloat(cols[lonIdx]);
+                            let name = cols[nameIdx] || "";
+                            
+                            if (name.startsWith('"') && name.endsWith('"')) {
+                                name = name.slice(1, -1).replace(/""/g, '"');
+                            }
+
+                            if (!isNaN(lat) && !isNaN(lon)) {
+                                vdvStopsGeoJson.features.push({
+                                    type: 'Feature',
+                                    geometry: { type: 'Point', coordinates: [lon, lat] },
+                                    properties: { name: name }
+                                });
+                            }
+                        }
+
+                        map.addSource('vdv-stops', { 
+                            type: 'geojson', 
+                            data: vdvStopsGeoJson,
+                            tolerance: 0.5 
+                        });
+
+                        const visibility = activeRouteGroups.length === 0 ? 'visible' : 'none';
+
+                        map.addLayer({
+                            id: 'vdv-stops-layer',
+                            type: 'circle',
+                            source: 'vdv-stops',
+                            minzoom: 15,
+                            layout: { 'visibility': visibility },
+                            paint: { 'circle-radius': 4, 'circle-color': '#58d68d', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 }
+                        });
+
+                        map.addLayer({
+                            id: 'vdv-stops-text-layer',
+                            type: 'symbol',
+                            source: 'vdv-stops',
+                            minzoom: 15,
+                            layout: {
+                                'visibility': visibility,
+                                'text-field': ['get', 'name'],
+                                'text-size': 12,
+                                'text-anchor': 'bottom',
+                                'text-offset': [0, -0.6]
+                            },
+                            paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
+                        });
+                    }
+                }
+            }
+        } catch(e) { console.warn("vdv stops.txt nenalezeno", e); }
+
         map.addSource('trip-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         map.addLayer({
             id: 'trip-route-layer',
@@ -530,6 +604,10 @@ function highlightRoute(groups) {
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
             if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-color', isRealtimeMode ? '#444444' : '#ffffff');
+            
+            // Zobrazení VDV zastávek při nulovém výběru linek
+            if (map.getLayer('vdv-stops-layer')) map.setLayoutProperty('vdv-stops-layer', 'visibility', 'visible');
+            if (map.getLayer('vdv-stops-text-layer')) map.setLayoutProperty('vdv-stops-text-layer', 'visibility', 'visible');
         } else {
             const matchOpacity = ['match', ['to-string', ['get', 'group']]];
             activeRouteGroups.forEach(g => matchOpacity.push(String(g), 1));
@@ -550,6 +628,10 @@ function highlightRoute(groups) {
             if (map.getLayer('zeleznice-layer')) {
                 map.setPaintProperty('zeleznice-layer', 'line-color', activeRouteGroups.includes('000') ? '#ffffff' : '#444444');
             }
+
+            // Skrytí VDV zastávek pokud je vybraná konkrétní linka
+            if (map.getLayer('vdv-stops-layer')) map.setLayoutProperty('vdv-stops-layer', 'visibility', 'none');
+            if (map.getLayer('vdv-stops-text-layer')) map.setLayoutProperty('vdv-stops-text-layer', 'visibility', 'none');
         }
     }
     updateURL();
