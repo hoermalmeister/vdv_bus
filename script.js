@@ -1322,3 +1322,65 @@ function updateCompass() {
 }
 map.on('rotate', updateCompass);
 map.on('move', updateCompass);
+
+// EXPERIMENT: Pokus o přímé napojení na Blazor WebSocket Havlíčkova Brodu
+async function hackHavlicekBrod() {
+    console.log("HB: Začínám vyjednávání (Negotiate)...");
+    try {
+        // 1. Uděláme Negotiate přes CORS Proxy
+        const negotiateUrl = `https://corsproxy.io/?${encodeURIComponent('https://www.mhdhb.cz/_blazor/negotiate?negotiateVersion=1')}`;
+        const negRes = await fetch(negotiateUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/plain;charset=UTF-8'
+            }
+        });
+        
+        const negData = await negRes.json();
+        const token = negData.connectionToken;
+        console.log("HB: Mám token!", token);
+
+        // 2. Otevřeme WebSocket přímo (zde může prohlížeč vyhodit CORS / Origin error)
+        console.log("HB: Připojuji WebSocket...");
+        const ws = new WebSocket(`wss://www.mhdhb.cz/_blazor?id=${token}`);
+
+        ws.onopen = () => {
+            console.log("HB: WebSocket ÚSPĚŠNĚ OTEVŘEN! Odesílám handshake...");
+            
+            // Odeslání SignalR Handshake (Zkusíme vnutit JSON místo MessagePacku)
+            // V SignalR musí každá zpráva končit speciálním znakem 0x1E (Record Separator)
+            ws.send(JSON.stringify({ protocol: "json", version: 1 }) + '\x1e');
+        };
+
+        ws.onmessage = async (event) => {
+            let text = "";
+            if (event.data instanceof Blob) {
+                text = await event.data.text();
+            } else {
+                text = event.data;
+            }
+
+            console.log("HB ZPRÁVA:", text.substring(0, 200) + "...");
+
+            // Pokud to projde a server pošle bus marker, vyhráli jsme!
+            if (text.includes("addBusMarker") || text.includes("updateBusMarker")) {
+                console.log("🎉 BINGO! Máme data o vozidlech!");
+                // Zde bychom pak jen přidali regex, který vytáhne ten tvůj JSON
+            }
+        };
+
+        ws.onerror = (err) => {
+            console.error("HB: WebSocket Chyba (Pravděpodobně nás server zablokoval kvůli hlavičce Origin):", err);
+        };
+
+        ws.onclose = () => {
+            console.log("HB: WebSocket byl uzavřen.");
+        };
+
+    } catch (e) {
+        console.error("HB: Proces selhal:", e);
+    }
+}
+
+// Spustíme experiment hned po načtení
+hackHavlicekBrod();
