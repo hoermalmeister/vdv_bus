@@ -1323,64 +1323,84 @@ function updateCompass() {
 map.on('rotate', updateCompass);
 map.on('move', updateCompass);
 
-// EXPERIMENT: Pokus o přímé napojení na Blazor WebSocket Havlíčkova Brodu
-async function hackHavlicekBrod() {
-    console.log("HB: Začínám vyjednávání (Negotiate)...");
+// --- EXPERIMENT: HAVLÍČKŮV BROD (BLAZORPACK WEBSOCKET HOOK) ---
+async function startHavlicekBrod() {
+    console.log("🚌 HB: Startuji proces napojení na Blazor...");
+    
     try {
-        // 1. Uděláme Negotiate přes CORS Proxy
-        const negotiateUrl = `https://corsproxy.io/?${encodeURIComponent('https://www.mhdhb.cz/_blazor/negotiate?negotiateVersion=1')}`;
-        const negRes = await fetch(negotiateUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'text/plain;charset=UTF-8'
-            }
-        });
+        // 1. Načteme tvůj soubor ms1.txt a převedeme ho na binární pole (Uint8Array)
+        const ms1Res = await fetch('ms1.txt?t=' + new Date().getTime());
+        if (!ms1Res.ok) throw new Error("Nepodařilo se načíst ms1.txt");
         
+        const ms1Text = await ms1Res.text();
+        // Rozdělíme text po řádcích, vyhodíme prázdné a převedeme HEX ("FA") na číslo (250)
+        const hexArray = ms1Text.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '').map(hex => parseInt(hex, 16));
+        const startCircuitPayload = new Uint8Array(hexArray);
+        console.log(`🚌 HB: Binární zpráva připravena (${startCircuitPayload.length} bajtů).`);
+
+        // 2. Negotiate (vyjednání spojení přes Proxy)
+        console.log("🚌 HB: Volám /negotiate...");
+        const negotiateUrl = `https://corsproxy.io/?${encodeURIComponent('https://www.mhdhb.cz/_blazor/negotiate?negotiateVersion=1')}`;
+        const negRes = await fetch(negotiateUrl, { method: 'POST' });
         const negData = await negRes.json();
         const token = negData.connectionToken;
-        console.log("HB: Mám token!", token);
+        console.log("🚌 HB: Token získán!", token);
 
-        // 2. Otevřeme WebSocket přímo (zde může prohlížeč vyhodit CORS / Origin error)
-        console.log("HB: Připojuji WebSocket...");
+        // 3. Přímé napojení na WebSocket
+        console.log("🚌 HB: Připojuji WebSocket...");
         const ws = new WebSocket(`wss://www.mhdhb.cz/_blazor?id=${token}`);
+        
+        // Zásadní: musíme přijímat data jako ArrayBuffer (binárně)
+        ws.binaryType = 'arraybuffer'; 
+        let handshakeDone = false;
 
         ws.onopen = () => {
-            console.log("HB: WebSocket ÚSPĚŠNĚ OTEVŘEN! Odesílám handshake...");
-            
-            // Odeslání SignalR Handshake (Zkusíme vnutit JSON místo MessagePacku)
-            // V SignalR musí každá zpráva končit speciálním znakem 0x1E (Record Separator)
-            ws.send(JSON.stringify({ protocol: "json", version: 1 }) + '\x1e');
+            console.log("🚌 HB: WebSocket otevřen! Posílám blazorpack handshake...");
+            // SignalR handshake vždy končí speciálním znakem 0x1E
+            ws.send('{"protocol":"blazorpack","version":1}\x1e');
         };
 
         ws.onmessage = async (event) => {
-            let text = "";
-            if (event.data instanceof Blob) {
-                text = await event.data.text();
-            } else {
-                text = event.data;
+            // Přestože je to binární MessagePack, obsahuje normální UTF-8 texty.
+            // Převedeme to hrubou silou na text, ignorujeme nezobrazitelné znaky.
+            const text = new TextDecoder().decode(event.data);
+            
+            // Fáze 1: Čekáme na potvrzení handshake
+            if (!handshakeDone) {
+                if (text.includes('{}')) {
+                    console.log("🚌 HB: Handshake potvrzen! Odesílám StartCircuit (ms1.txt)...");
+                    handshakeDone = true;
+                    // Vypálíme tvůj zachycený binární soubor
+                    ws.send(startCircuitPayload);
+                }
+                return;
             }
 
-            console.log("HB ZPRÁVA:", text.substring(0, 200) + "...");
-
-            // Pokud to projde a server pošle bus marker, vyhráli jsme!
+            // Fáze 2: Odposlech aktualizací
             if (text.includes("addBusMarker") || text.includes("updateBusMarker")) {
-                console.log("🎉 BINGO! Máme data o vozidlech!");
-                // Zde bychom pak jen přidali regex, který vytáhne ten tvůj JSON
+                
+                // Geniální trik: Místo psaní složitého MessagePack dekodéru prostě 
+                // pomocí Regexu "vykousneme" to JSON pole, které se tam schovává.
+                const match = text.match(/\[\{"parentId".*?\}\]/);
+                
+                if (match) {
+                    try {
+                        const vehicles = JSON.parse(match[0]);
+                        console.log("🎉 BINGO HB! Máme reálná data:", vehicles);
+                    } catch (e) {
+                        console.error("🚌 HB: Chyba při parsování vytaženého JSONu:", e);
+                    }
+                }
             }
         };
 
-        ws.onerror = (err) => {
-            console.error("HB: WebSocket Chyba (Pravděpodobně nás server zablokoval kvůli hlavičce Origin):", err);
-        };
-
-        ws.onclose = () => {
-            console.log("HB: WebSocket byl uzavřen.");
-        };
+        ws.onerror = (err) => console.error("🚌 HB: WebSocket chyba:", err);
+        ws.onclose = () => console.log("🚌 HB: Spojení ukončeno.");
 
     } catch (e) {
-        console.error("HB: Proces selhal:", e);
+        console.error("🚌 HB: Kritická chyba procesu:", e);
     }
 }
 
-// Spustíme experiment hned po načtení
-hackHavlicekBrod();
+// Spustíme hned po načtení stránky
+startHavlicekBrod();
