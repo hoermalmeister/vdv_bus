@@ -7,8 +7,8 @@ let isTimetableOpen = false;
 let rtInterval = null;
 let initialLoadAutoClickDone = false; 
 
-// Globální paměť pro nezávislé živé zdroje
-let currentVehiclesData = { vdv: [], jihlava: [], hb: [] };
+// Globální nezávislá paměť pro jednotlivé zdroje (zabraňuje zasekávání mapy)
+let liveCache = { vdv: [], jihlava: [], hb: [] };
 let isFetching = { vdv: false, jihlava: false, hb: false };
 
 // Pole pro uložení jedné nebo vícero linek z URL
@@ -87,38 +87,6 @@ async function fetchKrajskeHtml(url) {
     return await res.text();
 }
 
-// Pomocná funkce pro sloučení nezávisle stažených vozidel a update mapy
-function updateMapVehicles() {
-    const allFeatures = [
-        ...currentVehiclesData.vdv,
-        ...currentVehiclesData.jihlava,
-        ...currentVehiclesData.hb
-    ];
-    
-    const geojson = { type: 'FeatureCollection', features: allFeatures };
-    if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
-
-    if (selectedVehicleId !== null) {
-        const vToClick = allFeatures.find(item => String(item.properties.id) === String(selectedVehicleId));
-        if (vToClick) {
-            if (!initialLoadAutoClickDone) {
-                handleVehicleClick(vToClick.properties);
-                if (isTimetableOpen) {
-                    if (vToClick.properties.isHB) openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay);
-                    else if (!vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
-                }
-                initialLoadAutoClickDone = true;
-            } else {
-                handleVehicleClick(vToClick.properties);
-                if (isTimetableOpen) {
-                    if (vToClick.properties.isHB) openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay);
-                    else if (!vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
-                }
-            }
-        }
-    }
-}
-
 function fixCommasInHtml(htmlString) {
     const tempDiv = document.createElement('div');
     tempDiv.innerHTML = htmlString;
@@ -180,17 +148,61 @@ function getDistanceToLines(coord, multiLineCoords) {
     return minDist;
 }
 
-// Vytvoření dynamického popisku/ikony (S funkcí automatického roztažení do pilulky pro 6místná čísla)
+const PIXEL_RATIO = 2; 
+
+function getBadgeIcon(group, color) {
+    const id = `badge-${group}-${color}`;
+    if (map.hasImage(id)) return id;
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'bold 13px "Open Sans", Arial, sans-serif';
+    
+    const textWidth = ctx.measureText(group).width;
+    const width = Math.max(textWidth + 14, 24); 
+    const height = 24;
+
+    canvas.width = width * PIXEL_RATIO; 
+    canvas.height = height * PIXEL_RATIO;
+    ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
+    
+    ctx.fillStyle = 'rgba(20, 20, 20, 0.95)';
+    ctx.beginPath();
+    const r = 6;
+    ctx.moveTo(r, 1);
+    ctx.lineTo(width - r, 1);
+    ctx.quadraticCurveTo(width - 1, 1, width - 1, r);
+    ctx.lineTo(width - 1, height - r);
+    ctx.quadraticCurveTo(width - 1, height - 1, width - r, height - 1);
+    ctx.lineTo(r, height - 1);
+    ctx.quadraticCurveTo(1, height - 1, 1, height - r);
+    ctx.lineTo(1, r);
+    ctx.quadraticCurveTo(1, 1, r, 1);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.lineWidth = 2; 
+    ctx.strokeStyle = color; 
+    ctx.stroke();
+
+    ctx.font = 'bold 13px "Open Sans", Arial, sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(group, width / 2, height / 2 + 1.5);
+
+    map.addImage(id, ctx.getImageData(0, 0, width * PIXEL_RATIO, height * PIXEL_RATIO), { pixelRatio: PIXEL_RATIO });
+    return id;
+}
+
+// Základní ikonka pro vozidla (zůstává nezměněná kruhová)
 function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     const id = `v-${delayClass}-${label}-${isTrain ? 't' : 'b'}-${isNonVDV ? 'nvdv' : 'vdv'}`;
     if (map.hasImage(id)) return id;
 
-    const isLong = label.length > 3; // Kontrola, zda jde o 6místné číslo linky
-    const width = isLong ? Math.max(30, label.length * 7 + 12) : 30; // Dynamické roztažení na šířku
-    const size = 30; // Výška zůstává symetrická
-
+    const size = 30;
     const canvas = document.createElement('canvas');
-    canvas.width = width * PIXEL_RATIO; 
+    canvas.width = size * PIXEL_RATIO; 
     canvas.height = size * PIXEL_RATIO;
     const ctx = canvas.getContext('2d');
     ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
@@ -220,15 +232,6 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
         ctx.lineTo(offset, offset + br);
         ctx.quadraticCurveTo(offset, offset, offset + br, offset);
         ctx.closePath();
-    } else if (isLong) {
-        // Vykreslení protáhlé pilulky namísto těsného kruhu
-        const r = 13;
-        ctx.moveTo(r, size/2 - r);
-        ctx.lineTo(width - r, size/2 - r);
-        ctx.arc(width - r, size/2, r, -Math.PI/2, Math.PI/2);
-        ctx.lineTo(r, size/2 + r);
-        ctx.arc(r, size/2, r, Math.PI/2, -Math.PI/2);
-        ctx.closePath();
     } else {
         ctx.arc(size/2, size/2, 13, 0, Math.PI * 2);
     }
@@ -244,11 +247,11 @@ function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
         ctx.font = 'bold 15px "Open Sans", Arial, sans-serif';
         ctx.fillText('V', size/2, size/2 + 1);
     } else {
-        ctx.font = 'bold 11px "Open Sans", Arial, sans-serif';
-        ctx.fillText(label, width / 2, size / 2 + 1);
+        ctx.font = 'bold 12px "Open Sans", Arial, sans-serif';
+        ctx.fillText(label, size/2, size/2 + 1);
     }
 
-    map.addImage(id, ctx.getImageData(0, 0, width * PIXEL_RATIO, size * PIXEL_RATIO), { pixelRatio: PIXEL_RATIO });
+    map.addImage(id, ctx.getImageData(0, 0, size * PIXEL_RATIO, size * PIXEL_RATIO), { pixelRatio: PIXEL_RATIO });
     return id;
 }
 
@@ -479,6 +482,7 @@ map.on('load', async () => {
             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
         });
 
+        // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) VČETNĚ ZÓN ---
         try {
             const stopsUrl = 'https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime();
             const stopsRes = await fetch(stopsUrl, { cache: 'no-store' });
@@ -758,7 +762,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     } catch(e) { modalContent.innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
-// Zobrazení jízdního řádu HB (S přidaným tlačítkem zpět na mapu)
+// Zobrazení jízdního řádu HB
 window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
     const modalContent = document.getElementById('timetable-modal-content');
     const modal = document.getElementById('timetable-modal');
@@ -790,7 +794,7 @@ window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
                          </div>`;
         }
 
-        // Tlačítko Zpět na začátek tabulky pro snadný návrat na mapu
+        // Zpět na mapu tlačítko
         let backButtonHtml = `<div style="margin-bottom: 15px; text-align: left;">
             <button class="button is-small is-light" onclick="closeTimetable()">⬅ Zpět na mapu</button>
         </div>`;
@@ -831,7 +835,10 @@ window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
         modalContent.innerHTML = tableHtml;
 
     } catch (e) {
-        modalContent.innerHTML = "<div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div>";
+        let backButtonHtml = `<div style="margin-bottom: 15px; text-align: left;">
+            <button class="button is-small is-light" onclick="closeTimetable()">⬅ Zpět na mapu</button>
+        </div>`;
+        modalContent.innerHTML = `${backButtonHtml}<div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div>`;
     }
 };
 
@@ -877,11 +884,12 @@ async function handleVehicleClick(v) {
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
         
+        // Zde se v tabulce vykreslí plné vdvLine (605xxx) místo krátkého čísla
         let html = `
             <div>
                 <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
                     <tbody>
-                        <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.text}</td></tr>
+                        <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.vdvLine}</td></tr>
                         <tr><th style="white-space: nowrap;">Spoj</th><td style="font-weight: normal;">${v.runNumber}</td></tr>
                         <tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr>
                         <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
@@ -1247,7 +1255,37 @@ async function handleVehicleClick(v) {
     } catch(e) { console.error("Nelze načíst detail vozidla", e); }
 }
 
-// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (Zcela asynchronní a nezávislý) ---
+// Sloučení stažených dat do mapy
+function updateMapVehicles() {
+    const allFeatures = [
+        ...liveCache.vdv,
+        ...liveCache.jihlava,
+        ...liveCache.hb
+    ];
+    
+    if (map.getSource('vehicles')) {
+        map.getSource('vehicles').setData({ type: 'FeatureCollection', features: allFeatures });
+    }
+
+    if (selectedVehicleId !== null) {
+        const vToClick = allFeatures.find(item => String(item.properties.id) === String(selectedVehicleId));
+        if (vToClick) {
+            if (!initialLoadAutoClickDone) {
+                handleVehicleClick(vToClick.properties);
+                if (isTimetableOpen) {
+                    if (vToClick.properties.isHB) openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay);
+                    else if (!vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
+                }
+                initialLoadAutoClickDone = true;
+            } else {
+                // Překreslí jen okno, zachová trasu
+                handleVehicleClick(vToClick.properties);
+            }
+        }
+    }
+}
+
+// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (Asynchronní) ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
@@ -1280,6 +1318,7 @@ function toggleRealtimeMode(forceState = null) {
 
 if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
 
+// Každé město má nyní svůj vlastní zámek. Žádné město už nebude blokovat to další.
 function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
@@ -1288,7 +1327,7 @@ function fetchLiveVehicles() {
     const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
     const hbUrl = `https://hb-mhd-bridge-1.onrender.com/hb.geojson?t=${timestamp}`;
 
-    // --- ZDROJ 1: KRAJ VYSOČINA (VDV) ---
+    // 1. ZDROJ: VDV (Kraj Vysočina)
     if (!isFetching.vdv) {
         isFetching.vdv = true;
         fetch(vdvUrl, { cache: 'no-store' })
@@ -1323,14 +1362,14 @@ function fetchLiveVehicles() {
                         }
                     });
                 });
-                currentVehiclesData.vdv = features;
+                liveCache.vdv = features;
                 updateMapVehicles();
             })
             .catch(e => console.warn("Chyba VDV:", e))
             .finally(() => isFetching.vdv = false);
     }
 
-    // --- ZDROJ 2: JIHLAVA (MHD) ---
+    // 2. ZDROJ: Jihlava
     if (!isFetching.jihlava) {
         isFetching.jihlava = true;
         fetch(jihlavaUrl, { cache: 'no-store' })
@@ -1362,14 +1401,14 @@ function fetchLiveVehicles() {
                         });
                     });
                 }
-                currentVehiclesData.jihlava = features;
+                liveCache.jihlava = features;
                 updateMapVehicles();
             })
             .catch(e => console.warn("Chyba Jihlava:", e))
             .finally(() => isFetching.jihlava = false);
     }
 
-    // --- ZDROJ 3: HAVLÍČKŮV BROD (Zcela nezávislý a neblokující) ---
+    // 3. ZDROJ: Havlíčkův Brod
     if (!isFetching.hb) {
         isFetching.hb = true;
         fetch(hbUrl, { cache: 'no-store' })
@@ -1379,18 +1418,16 @@ function fetchLiveVehicles() {
                 if (hbData && hbData.features) {
                     hbData.features.forEach(f => {
                         const p = f.properties;
-                        if (!p.lastStop || p.lastStop.trim() === "") return; // Ignorujeme prázdné odjezdy
-                        
-                        // Linka z URL filtru se porovnává buď s krátkým nebo dlouhým číslem
+                        if (!p.lastStop || p.lastStop.trim() === "") return; 
                         if (activeRouteGroups.length > 0 && !activeRouteGroups.includes(p.shortLine) && !activeRouteGroups.includes(p.vdvLine)) return;
                         
                         p.lng = f.geometry.coordinates[0];
                         p.lat = f.geometry.coordinates[1];
                         p.isHB = true;
                         
-                        // ZMĚNA: Přepisujeme text a ikonku na plné šestimístné číslo vdvLine!
-                        p.text = p.vdvLine; 
-                        p.iconId = getVehicleIcon(p.delayClass || 'ok', p.vdvLine, false, false);
+                        // Zde do ikonky na mapě posíláme krátké číslo (p.shortLine), 
+                        // detailní tabulka v popupu (html níže) si bere p.vdvLine
+                        p.iconId = getVehicleIcon(p.delayClass || 'ok', p.shortLine, false, false);
                         
                         features.push({
                             type: 'Feature',
@@ -1399,10 +1436,10 @@ function fetchLiveVehicles() {
                         });
                     });
                 }
-                currentVehiclesData.hb = features;
+                liveCache.hb = features;
                 updateMapVehicles();
             })
-            .catch(e => console.warn("Havlíčkův Brod ještě spí (probouzí se z Render spánku)..."))
+            .catch(e => console.warn("Havlíčkův Brod čeká na probuzení Render.com serveru..."))
             .finally(() => isFetching.hb = false);
     }
 }
