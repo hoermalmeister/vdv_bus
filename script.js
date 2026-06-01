@@ -678,7 +678,7 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE PRO VDV A HB) ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
 let cachedVehicleId = null;
 let cachedInfoRaw = null;
 let cachedTimetableRaw = null;
@@ -760,7 +760,6 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     } catch(e) { modalContent.innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
-// Zobrazení jízdního řádu HB s IDENTICKÝM Bulma formátem
 window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
     const modalContent = document.getElementById('timetable-modal-content');
     const modal = document.getElementById('timetable-modal');
@@ -785,7 +784,7 @@ window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
             ? `<span style="margin-left: 15px;">Zpoždění: <b style="color:${delayClass}">${delayText}</b></span>`
             : "";
 
-        // Formát modálního okna převzatý 1:1 z VDV z tvého kódu
+        // Plně sjednocený HTML kód odpovídající Krajským VDV pop-upům
         let html = `
         <div class="field">
             <nav class="level is-mobile mb-2">
@@ -909,7 +908,7 @@ async function handleVehicleClick(v) {
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
         
-        // Zcela identický kód popup okna jako u VDV (vč. bulma classes a font-awesome ikony)
+        // Zcela identický kód popup okna jako u VDV 
         let html = `
             <div class="table-container">
                 <table class="table is-striped is-fullwidth" style="margin-bottom: 0;">
@@ -921,14 +920,12 @@ async function handleVehicleClick(v) {
                         <tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr>
                     </tbody>
                 </table>
-                <div style="margin-top: 10px;">
-                    <button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})">
-                        <span class="icon is-small">
-                            <i class="fas fa-table"></i>
-                        </span>
-                        <span>Jízdní řád</span>
-                    </button>
-                </div>
+                <button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})" style="margin-top: 5px;">
+                    <span class="icon is-small">
+                        <i class="fas fa-table"></i>
+                    </span>
+                    <span>Jízdní řád</span>
+                </button>
             </div>
         `;
 
@@ -1312,7 +1309,7 @@ function updateMapVehicles() {
     }
 }
 
-// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (Asynchronní) ---
+// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (Nezávislý a neblokující) ---
 function toggleRealtimeMode(forceState = null) {
     isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
     const btn = document.getElementById('rt-btn');
@@ -1345,7 +1342,6 @@ function toggleRealtimeMode(forceState = null) {
 
 if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
 
-// Nezávislé volání 3 zdrojů - rychlé město nečeká na spící proxy
 function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
@@ -1354,7 +1350,7 @@ function fetchLiveVehicles() {
     const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
     const hbUrl = `https://hb-mhd-bridge-1.onrender.com/hb.geojson?t=${timestamp}`;
 
-    // 1. ZDROJ: VDV (Kraj)
+    // ZDROJ: VDV (Kraj)
     if (!isFetching.vdv) {
         isFetching.vdv = true;
         fetch(vdvUrl, { cache: 'no-store' })
@@ -1396,7 +1392,7 @@ function fetchLiveVehicles() {
             .finally(() => isFetching.vdv = false);
     }
 
-    // 2. ZDROJ: Jihlava
+    // ZDROJ: Jihlava
     if (!isFetching.jihlava) {
         isFetching.jihlava = true;
         fetch(jihlavaUrl, { cache: 'no-store' })
@@ -1435,7 +1431,7 @@ function fetchLiveVehicles() {
             .finally(() => isFetching.jihlava = false);
     }
 
-    // 3. ZDROJ: Havlíčkův Brod
+    // ZDROJ: Havlíčkův Brod
     if (!isFetching.hb) {
         isFetching.hb = true;
         fetch(hbUrl, { cache: 'no-store' })
@@ -1452,8 +1448,9 @@ function fetchLiveVehicles() {
                         p.lat = f.geometry.coordinates[1];
                         p.isHB = true;
                         
-                        // Zde je ikona na mapě krátká:
-                        p.iconId = getVehicleIcon(p.delayClass || 'ok', p.shortLine, false, false);
+                        // Zde je isNonVDV nastaveno na true -> generuje modrý okraj
+                        p.isNonVDV = true;
+                        p.iconId = getVehicleIcon(p.delayClass || 'ok', p.shortLine, false, true);
                         
                         features.push({
                             type: 'Feature',
@@ -1465,7 +1462,7 @@ function fetchLiveVehicles() {
                 liveCache.hb = features;
                 updateMapVehicles();
             })
-            .catch(e => console.warn("Havlíčkův Brod proxy server se probouzí..."))
+            .catch(e => console.warn("Havlíčkův Brod čeká na probuzení Render.com serveru..."))
             .finally(() => isFetching.hb = false);
     }
 }
@@ -1494,12 +1491,15 @@ compassBtn.style.cssText = `
 document.body.appendChild(compassBtn);
 
 compassBtn.addEventListener('click', () => {
-    map.resetNorth({ duration: 500 });
+    // Srovná kompas na sever a zruší naklopení (pitch)
+    map.resetNorthPitch({ duration: 500 });
 });
 
 function updateCompass() {
     const bearing = map.getBearing();
-    if (Math.abs(bearing) < 0.5) {
+    const pitch = map.getPitch();
+    // Kompas zmizí pouze tehdy, když není ani otočeno, ani naklopeno
+    if (Math.abs(bearing) < 0.5 && pitch < 1) {
         compassBtn.style.display = 'none';
     } else {
         compassBtn.style.display = 'flex';
@@ -1507,4 +1507,5 @@ function updateCompass() {
     }
 }
 map.on('rotate', updateCompass);
+map.on('pitch', updateCompass); // Přidáno sledování naklopení (pitch)
 map.on('move', updateCompass);
