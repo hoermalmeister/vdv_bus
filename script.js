@@ -7,16 +7,11 @@ let isTimetableOpen = false;
 let rtInterval = null;
 let initialLoadAutoClickDone = false; 
 
-// Globální nezávislá paměť pro jednotlivé zdroje (zabraňuje zasekávání mapy)
 let liveCache = { vdv: [], jihlava: [], hb: [] };
 let isFetching = { vdv: false, jihlava: false, hb: false };
-
-// Pole pro uložení jedné nebo vícero linek z URL
 let activeRouteGroups = [];
-
 const urlParams = new URLSearchParams(window.location.search);
 
-// Výchozí chování: Pokud je URL čistá (bez parametrů), rovnou spustíme Realtime režim!
 if (!window.location.search || window.location.search === '?') {
     isRealtimeMode = true;
 } else {
@@ -39,14 +34,12 @@ function getShortLine(text) {
     return s ? parseInt(s, 10).toString() : "??";
 }
 
-// --- 0. WIKIDATA API PRO UIC KÓDY STANIC ---
 const uicCache = {};
 async function getStationNameByUIC(uic) {
     if (uicCache[uic]) return uicCache[uic];
     try {
         const query = `SELECT ?itemLabel WHERE { ?item wdt:P722 "${uic}". SERVICE wikibase:label { bd:serviceParam wikibase:language "cs". } }`;
-        const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(query)}&format=json`;
-        const res = await fetch(url, { headers: { 'Accept': 'application/sparql-results+json' }});
+        const res = await fetch(`https://query.wikidata.org/sparql?query=${encodeURIComponent(query)}&format=json`, { headers: { 'Accept': 'application/sparql-results+json' }});
         if (res.ok) {
             const data = await res.json();
             if (data.results.bindings.length > 0) {
@@ -54,97 +47,58 @@ async function getStationNameByUIC(uic) {
                 return uicCache[uic];
             }
         }
-    } catch (e) { console.warn("Chyba při dotazu na Wikidata:", e); }
-    uicCache[uic] = uic; 
-    return uic;
+    } catch (e) { console.warn("Chyba Wikidata:", e); }
+    uicCache[uic] = uic; return uic;
 }
 
-// --- 1. INICIALIZACE MAPLIBRE (WEBGL) ---
-const initialMaxZoom = isRealtimeMode ? 19 : 15;
 const map = new maplibregl.Map({
     container: 'map',
     style: {
         version: 8,
         glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-        sources: {
-            'carto-dark': {
-                type: 'raster',
-                tiles: ['https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-                tileSize: 256
-            }
-        },
+        sources: { 'carto-dark': { type: 'raster', tiles: ['https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'], tileSize: 256 } },
         layers: [{ id: 'carto-dark-layer', type: 'raster', source: 'carto-dark' }]
     },
     center: [startLng, startLat],
     zoom: startZoom,
-    maxZoom: initialMaxZoom
+    maxZoom: isRealtimeMode ? 19 : 15
 });
 
 async function fetchKrajskeHtml(url) {
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-    const res = await fetch(proxyUrl);
-    if (!res.ok) throw new Error("Chyba při stahování HTML");
+    const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
+    if (!res.ok) throw new Error("Chyba stahování HTML");
     return await res.text();
 }
 
 function fixCommasInHtml(htmlString) {
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = htmlString;
+    const tempDiv = document.createElement('div'); tempDiv.innerHTML = htmlString;
     const walker = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
     let node;
-    while ((node = walker.nextNode())) {
-        if (node.nodeValue.trim() !== '') {
-            node.nodeValue = node.nodeValue.replace(/,(?=[^\s])/g, ', ');
-        }
-    }
+    while ((node = walker.nextNode())) { if (node.nodeValue.trim() !== '') node.nodeValue = node.nodeValue.replace(/,(?=[^\s])/g, ', '); }
     return tempDiv.innerHTML;
 }
 
 function removeWheelchairInfo(tempDiv) {
     tempDiv.querySelectorAll('tr, .level, .columns, li, p').forEach(el => {
-        if (el && el.textContent) {
-            const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            if (txt.includes('bezbari')) el.remove();
-        }
+        if (el && el.textContent && el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('bezbari')) el.remove();
     });
 }
 
 function getDistance(pt1, pt2) {
-    const dx = pt1[0] - pt2[0], dy = pt1[1] - pt2[1];
-    return Math.sqrt(dx*dx + dy*dy) * 111000;
+    return Math.sqrt(Math.pow(pt1[0] - pt2[0], 2) + Math.pow(pt1[1] - pt2[1], 2)) * 111000;
 }
 
 function normalizeStopName(name) {
-    let s = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    s = s.replace(/[,.\-\/]/g, ' ');
-    s = s.replace(/\s+/g, ' ').trim();
-    s = s.replace(/\bn mor\b/g, 'na morave');
-    s = s.replace(/\bn morave\b/g, 'na morave');
-    s = s.replace(/\baut nadr\b/g, 'autobusovenadrazi');
-    s = s.replace(/\baut nadrazi\b/g, 'autobusovenadrazi');
-    s = s.replace(/\bzel st\b/g, 'zeleznicnistanice');
-    s = s.replace(/\bz st\b/g, 'zeleznicnistanice');
-    
-    const dict = {
-        'nam': 'namesti', 'rozc': 'rozcesti', 'zast': 'zastavka', 'sidl': 'sidliste',
-        'nem': 'nemocnice', 'nemoc': 'nemocnice', 'vyzk': 'vyzkumny', 'ust': 'ustav',
-        'n': 'nad', 'p': 'pod', 'm': 'mesto', 'saz': 'sazavou', 'osl': 'oslavou',
-        'doubr': 'doubravou', 'bystr': 'bystrici', 'mor': 'morave', 'l': 'labem', 'vlt': 'vltavou',
-        'odb': 'odbocka', 'st': 'stanice', 'zel': 'zeleznicni', 'aut': 'autobusove', 'nadr': 'nadrazi',
-        'stred': 'stredisko', 'zs': 'zakladniskola', 'u': 'u'
-    };
+    let s = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[,.\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+    s = s.replace(/\bn mor\b/g, 'na morave').replace(/\bn morave\b/g, 'na morave').replace(/\baut nadr\b/g, 'autobusovenadrazi').replace(/\baut nadrazi\b/g, 'autobusovenadrazi').replace(/\bzel st\b/g, 'zeleznicnistanice').replace(/\bz st\b/g, 'zeleznicnistanice');
+    const dict = { 'nam':'namesti','rozc':'rozcesti','zast':'zastavka','sidl':'sidliste','nem':'nemocnice','nemoc':'nemocnice','vyzk':'vyzkumny','ust':'ustav','n':'nad','p':'pod','m':'mesto','saz':'sazavou','osl':'oslavou','doubr':'doubravou','bystr':'bystrici','mor':'morave','l':'labem','vlt':'vltavou','odb':'odbocka','st':'stanice','zel':'zeleznicni','aut':'autobusove','nadr':'nadrazi','stred':'stredisko','zs':'zakladniskola','u':'u' };
     return s.split(' ').map(w => dict[w] || w).join(' ');
 }
 
 function getDistanceToLines(coord, multiLineCoords) {
-    if (!multiLineCoords || multiLineCoords.length === 0) return Infinity;
+    if (!multiLineCoords || !multiLineCoords.length) return Infinity;
     let minDist = Infinity;
-    for (let line of multiLineCoords) {
-        for (let pt of line) {
-            let d = getDistance(coord, pt);
-            if (d < minDist) minDist = d;
-        }
-    }
+    for (let line of multiLineCoords) for (let pt of line) { let d = getDistance(coord, pt); if (d < minDist) minDist = d; }
     return minDist;
 }
 
@@ -153,44 +107,15 @@ const PIXEL_RATIO = 2;
 function getBadgeIcon(group, color) {
     const id = `badge-${group}-${color}`;
     if (map.hasImage(id)) return id;
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+    const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
     ctx.font = 'bold 13px "Open Sans", Arial, sans-serif';
-    
-    const textWidth = ctx.measureText(group).width;
-    const width = Math.max(textWidth + 14, 24); 
-    const height = 24;
-
-    canvas.width = width * PIXEL_RATIO; 
-    canvas.height = height * PIXEL_RATIO;
-    ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
-    
+    const textWidth = ctx.measureText(group).width; const width = Math.max(textWidth + 14, 24); const height = 24;
+    canvas.width = width * PIXEL_RATIO; canvas.height = height * PIXEL_RATIO; ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
     ctx.fillStyle = 'rgba(20, 20, 20, 0.95)';
-    ctx.beginPath();
-    const r = 6;
-    ctx.moveTo(r, 1);
-    ctx.lineTo(width - r, 1);
-    ctx.quadraticCurveTo(width - 1, 1, width - 1, r);
-    ctx.lineTo(width - 1, height - r);
-    ctx.quadraticCurveTo(width - 1, height - 1, width - r, height - 1);
-    ctx.lineTo(r, height - 1);
-    ctx.quadraticCurveTo(1, height - 1, 1, height - r);
-    ctx.lineTo(1, r);
-    ctx.quadraticCurveTo(1, 1, r, 1);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.lineWidth = 2; 
-    ctx.strokeStyle = color; 
-    ctx.stroke();
-
-    ctx.font = 'bold 13px "Open Sans", Arial, sans-serif';
-    ctx.fillStyle = '#ffffff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(group, width / 2, height / 2 + 1.5);
-
+    ctx.beginPath(); const r = 6;
+    ctx.moveTo(r, 1); ctx.lineTo(width - r, 1); ctx.quadraticCurveTo(width - 1, 1, width - 1, r); ctx.lineTo(width - 1, height - r); ctx.quadraticCurveTo(width - 1, height - 1, width - r, height - 1); ctx.lineTo(r, height - 1); ctx.quadraticCurveTo(1, height - 1, 1, height - r); ctx.lineTo(1, r); ctx.quadraticCurveTo(1, 1, r, 1); ctx.closePath();
+    ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.stroke();
+    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(group, width / 2, height / 2 + 1.5);
     map.addImage(id, ctx.getImageData(0, 0, width * PIXEL_RATIO, height * PIXEL_RATIO), { pixelRatio: PIXEL_RATIO });
     return id;
 }
@@ -198,72 +123,37 @@ function getBadgeIcon(group, color) {
 function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     const id = `v-${delayClass}-${label}-${isTrain ? 't' : 'b'}-${isNonVDV ? 'nvdv' : 'vdv'}`;
     if (map.hasImage(id)) return id;
+    const size = 30; const canvas = document.createElement('canvas');
+    canvas.width = size * PIXEL_RATIO; canvas.height = size * PIXEL_RATIO; const ctx = canvas.getContext('2d'); ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
 
-    const size = 30;
-    const canvas = document.createElement('canvas');
-    canvas.width = size * PIXEL_RATIO; 
-    canvas.height = size * PIXEL_RATIO;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
-
-    let bgColor = '#58d68d'; let textColor = '#111'; 
-    let borderColor = isNonVDV ? '#3498db' : '#fff'; 
-    
+    let bgColor = '#58d68d'; let textColor = '#111'; let borderColor = isNonVDV ? '#3498db' : '#fff'; 
     if (delayClass === 'unknown') { bgColor = '#7f8c8d'; textColor = '#fff'; }
     else if (delayClass === 'warn') bgColor = '#f39c12';
     else if (delayClass === 'alert') { bgColor = '#e74c3c'; textColor = '#fff'; }
-    else if (delayClass === 'dim') { 
-        bgColor = '#1a2530'; 
-        borderColor = isNonVDV ? '#2980b9' : '#2c3e50'; 
-        textColor = '#5dade2'; 
-    }
+    else if (delayClass === 'dim') { bgColor = '#1a2530'; borderColor = isNonVDV ? '#2980b9' : '#2c3e50'; textColor = '#5dade2'; }
 
     ctx.beginPath();
     if (isTrain) {
-        const br = 6; const s = 26; const offset = 2;
-        ctx.moveTo(offset + br, offset);
-        ctx.lineTo(offset + s - br, offset);
-        ctx.quadraticCurveTo(offset + s, offset, offset + s, offset + br);
-        ctx.lineTo(offset + s, offset + s - br);
-        ctx.quadraticCurveTo(offset + s, offset + s, offset + s - br, offset + s);
-        ctx.lineTo(offset + br, offset + s);
-        ctx.quadraticCurveTo(offset, offset + s, offset, offset + s - br);
-        ctx.lineTo(offset, offset + br);
-        ctx.quadraticCurveTo(offset, offset, offset + br, offset);
-        ctx.closePath();
-    } else {
-        ctx.arc(size/2, size/2, 13, 0, Math.PI * 2);
-    }
+        const br = 6, s = 26, offset = 2;
+        ctx.moveTo(offset + br, offset); ctx.lineTo(offset + s - br, offset); ctx.quadraticCurveTo(offset + s, offset, offset + s, offset + br); ctx.lineTo(offset + s, offset + s - br); ctx.quadraticCurveTo(offset + s, offset + s, offset + s - br, offset + s); ctx.lineTo(offset + br, offset + s); ctx.quadraticCurveTo(offset, offset + s, offset, offset + s - br); ctx.lineTo(offset, offset + br); ctx.quadraticCurveTo(offset, offset, offset + br, offset); ctx.closePath();
+    } else ctx.arc(size/2, size/2, 13, 0, Math.PI * 2);
     
-    ctx.fillStyle = bgColor; ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = borderColor; ctx.stroke();
-
-    ctx.fillStyle = textColor;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    
-    if (isTrain) {
-        ctx.font = 'bold 15px "Open Sans", Arial, sans-serif';
-        ctx.fillText('V', size/2, size/2 + 1);
-    } else {
-        ctx.font = 'bold 12px "Open Sans", Arial, sans-serif';
-        ctx.fillText(label, size/2, size/2 + 1);
-    }
-
+    ctx.fillStyle = bgColor; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = borderColor; ctx.stroke();
+    ctx.fillStyle = textColor; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (isTrain) { ctx.font = 'bold 15px "Open Sans", Arial, sans-serif'; ctx.fillText('V', size/2, size/2 + 1); } 
+    else { ctx.font = 'bold 12px "Open Sans", Arial, sans-serif'; ctx.fillText(label, size/2, size/2 + 1); }
     map.addImage(id, ctx.getImageData(0, 0, size * PIXEL_RATIO, size * PIXEL_RATIO), { pixelRatio: PIXEL_RATIO });
     return id;
 }
 
 function findBestStop(normName, multiLineCoords, previousCoord) {
     let candidates = allStops.filter(s => s.normalized === normName);
-    if (candidates.length === 0) return null;
+    if (!candidates.length) return null;
     if (candidates.length === 1) return candidates[0].coords;
-
-    let bestCandidate = null;
-    let minScore = Infinity;
+    let bestCandidate = null; let minScore = Infinity;
     for (let c of candidates) {
         let score = Infinity;
-        if (multiLineCoords && multiLineCoords.length > 0) score = getDistanceToLines(c.coords, multiLineCoords);
+        if (multiLineCoords && multiLineCoords.length) score = getDistanceToLines(c.coords, multiLineCoords);
         else if (previousCoord) score = getDistance(c.coords, previousCoord);
         if (score < minScore) { minScore = score; bestCandidate = c.coords; }
     }
@@ -271,25 +161,20 @@ function findBestStop(normName, multiLineCoords, previousCoord) {
 }
 
 function getPathBetweenStops(coordA, coordB, multiLineCoords) {
-    let bestPath = null;
-    let minError = Infinity;
+    let bestPath = null; let minError = Infinity;
     for (let line of multiLineCoords) {
-        let idxA = -1, idxB = -1;
-        let MathMinA = Infinity, MathMinB = Infinity;
+        let idxA = -1, idxB = -1, MathMinA = Infinity, MathMinB = Infinity;
         for (let i = 0; i < line.length; i++) {
-            let pt = line[i];
-            let dA = getDistance(pt, coordA);
-            let dB = getDistance(pt, coordB);
+            let dA = getDistance(line[i], coordA); let dB = getDistance(line[i], coordB);
             if (dA < MathMinA) { MathMinA = dA; idxA = i; }
             if (dB < MathMinB) { MathMinB = dB; idxB = i; }
         }
         if (MathMinA < 500 && MathMinB < 500 && idxA !== -1 && idxB !== -1) {
             let error = MathMinA + MathMinB;
             if (error < minError) {
-                minError = error;
-                let path = [];
-                if (idxA <= idxB) { for (let k = idxA; k <= idxB; k++) path.push(line[k]); } 
-                else { for (let k = idxA; k >= idxB; k--) path.push(line[k]); }
+                minError = error; let path = [];
+                if (idxA <= idxB) for (let k = idxA; k <= idxB; k++) path.push(line[k]);
+                else for (let k = idxA; k >= idxB; k--) path.push(line[k]);
                 bestPath = path;
             }
         }
@@ -298,61 +183,32 @@ function getPathBetweenStops(coordA, coordB, multiLineCoords) {
 }
 
 function updateURL() {
-    const center = map.getCenter();
-    const params = new URLSearchParams();
-    params.set('x', center.lng.toFixed(4));
-    params.set('y', center.lat.toFixed(4));
-    params.set('z', map.getZoom().toFixed(1));
+    const center = map.getCenter(); const params = new URLSearchParams();
+    params.set('x', center.lng.toFixed(4)); params.set('y', center.lat.toFixed(4)); params.set('z', map.getZoom().toFixed(1));
     if (isRealtimeMode) params.set('rt', '1');
-    
-    if (activeRouteGroups.length > 0) {
-        activeRouteGroups.forEach(g => params.append('line', g));
-    }
-    
+    if (activeRouteGroups.length) activeRouteGroups.forEach(g => params.append('line', g));
     if (selectedVehicleId) params.set('id', selectedVehicleId);
     if (isTimetableOpen) params.set('tt', '1');
     window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
 }
 
-map.on('moveend', updateURL);
-map.on('zoomend', updateURL);
+map.on('moveend', updateURL); map.on('zoomend', updateURL);
 
-// --- UNIVERZÁLNÍ CSV PARSER ---
 function parseCSVLine(text, delimiter) {
     let ret = [], inQuotes = false, val = '';
     for (let i = 0; i < text.length; i++) {
         let ch = text[i];
         if (inQuotes) {
-            if (ch === '"') {
-                if (i + 1 < text.length && text[i+1] === '"') {
-                    val += '"'; i++;
-                } else {
-                    inQuotes = false;
-                }
-            } else {
-                val += ch;
-            }
+            if (ch === '"') { if (i + 1 < text.length && text[i+1] === '"') { val += '"'; i++; } else inQuotes = false; } else val += ch;
         } else {
-            if (ch === '"') {
-                inQuotes = true;
-            } else if (ch === delimiter) {
-                ret.push(val); val = '';
-            } else {
-                val += ch;
-            }
+            if (ch === '"') inQuotes = true; else if (ch === delimiter) { ret.push(val); val = ''; } else val += ch;
         }
     }
-    ret.push(val);
-    return ret;
+    ret.push(val); return ret;
 }
 
-// --- 3. NAČÍTÁNÍ DAT A PŘÍPRAVA VRSTEV ---
 map.on('load', async () => {
-    try {
-        const r = await fetch('spoje.json?t=' + new Date().getTime());
-        if (r.ok) tripShapes = await r.json();
-    } catch (e) { console.warn("spoje.json nenalezen", e); }
-
+    try { const r = await fetch('spoje.json?t=' + new Date().getTime()); if (r.ok) tripShapes = await r.json(); } catch (e) {}
     try {
         const zRes = await fetch('zeleznice.txt?t=' + new Date().getTime());
         if (zRes.ok) {
@@ -360,281 +216,87 @@ map.on('load', async () => {
             try {
                 const zData = JSON.parse(zText);
                 if (Array.isArray(zData)) {
-                    zData.forEach(item => {
-                        const n = item.name || item.stop_name || item.Name || item.stanice;
-                        const lat = item.lat || item.stop_lat || item.Lat;
-                        const lon = item.lon || item.lng || item.stop_lon || item.Lon;
-                        if (n && lat && lon) trainStopsMap[n] = [parseFloat(lon), parseFloat(lat)];
-                    });
-                } else {
-                    for (let key in zData) {
-                        let c = zData[key];
-                        if (c[0] > 40) trainStopsMap[key] = [c[1], c[0]]; 
-                        else trainStopsMap[key] = [c[0], c[1]];
-                    }
-                }
+                    zData.forEach(item => { const n = item.name||item.stop_name||item.Name||item.stanice; const lat = item.lat||item.stop_lat||item.Lat; const lon = item.lon||item.lng||item.stop_lon||item.Lon; if (n && lat && lon) trainStopsMap[n] = [parseFloat(lon), parseFloat(lat)]; });
+                } else { for (let key in zData) trainStopsMap[key] = zData[key][0] > 40 ? [zData[key][1], zData[key][0]] : [zData[key][0], zData[key][1]]; }
             } catch(e) {
                 zText.split('\n').forEach(line => {
-                    const parts = line.split(/[;,]/);
-                    if (parts.length >= 3) {
-                        const name = parts[0].replace(/"/g, '').trim();
-                        const p1 = parseFloat(parts[1]);
-                        const p2 = parseFloat(parts[2]);
-                        if (!isNaN(p1) && !isNaN(p2)) {
-                            if (p1 > 40) trainStopsMap[name] = [p2, p1];
-                            else trainStopsMap[name] = [p1, p2];
-                        }
-                    }
+                    const parts = line.split(/[;,]/); if (parts.length >= 3) { const name = parts[0].replace(/"/g, '').trim(); const p1 = parseFloat(parts[1]), p2 = parseFloat(parts[2]); if (!isNaN(p1) && !isNaN(p2)) trainStopsMap[name] = p1 > 40 ? [p2, p1] : [p1, p2]; }
                 });
             }
         }
-    } catch(e) { console.warn("zeleznice.txt pro vlaky nenalezeno", e); }
-
+    } catch(e) {}
     try {
         const resZelGeo = await fetch('zeleznice.geojson?t=' + new Date().getTime());
         if (resZelGeo.ok) {
-            const zelGeoData = await resZelGeo.json();
-            map.addSource('zeleznice-trasy', { type: 'geojson', data: zelGeoData });
-            map.addLayer({
-                id: 'zeleznice-layer',
-                type: 'line',
-                source: 'zeleznice-trasy',
-                paint: {
-                    'line-color': '#ffffff',
-                    'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2, 15, 5],
-                    'line-opacity': 1 
-                }
-            }); 
+            map.addSource('zeleznice-trasy', { type: 'geojson', data: await resZelGeo.json() });
+            map.addLayer({ id: 'zeleznice-layer', type: 'line', source: 'zeleznice-trasy', paint: { 'line-color': '#ffffff', 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 2, 15, 5], 'line-opacity': 1 } }); 
         }
-    } catch(e) { console.warn("zeleznice.geojson nenalezena", e); }
-
+    } catch(e) {}
     try {
         const res = await fetch('trasy.geojson?t=' + new Date().getTime());
         geojsonData = await res.json();
-
         geojsonData.features.forEach(f => {
-            if (f.geometry.type === 'Point' && f.properties.type === 'stop') {
-                allStops.push({
-                    coords: f.geometry.coordinates,
-                    name: f.properties.name,
-                    normalized: normalizeStopName(f.properties.name)
-                });
-            }
-            if (f.geometry.type === 'Point' && f.properties.type === 'badge') {
-                f.properties.group = getShortLine(f.properties.group);
-                f.properties.iconId = getBadgeIcon(f.properties.group, f.properties.color);
-            }
+            if (f.geometry.type === 'Point' && f.properties.type === 'stop') allStops.push({ coords: f.geometry.coordinates, name: f.properties.name, normalized: normalizeStopName(f.properties.name) });
+            if (f.geometry.type === 'Point' && f.properties.type === 'badge') { f.properties.group = getShortLine(f.properties.group); f.properties.iconId = getBadgeIcon(f.properties.group, f.properties.color); }
         });
-
-        map.addSource('trasy', { 
-            type: 'geojson', 
-            data: geojsonData,
-            maxzoom: 20,
-            tolerance: 0.5
-        });
-
-        map.addLayer({
-            id: 'lines-layer',
-            type: 'line',
-            source: 'trasy',
-            filter: ['!=', ['geometry-type'], 'Point'], 
-            paint: {
-                'line-color': ['get', 'color'],
-                'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6],
-                'line-opacity': 0.9
-            }
-        });
-
-        map.addLayer({
-            id: 'badges-layer',
-            type: 'symbol',
-            source: 'trasy',
-            filter: ['==', ['get', 'type'], 'badge'],
-            layout: {
-                'icon-image': ['get', 'iconId'],
-                'icon-allow-overlap': false, 
-                'icon-ignore-placement': false 
-            }
-        });
-
-        map.addLayer({
-            id: 'stops-layer',
-            type: 'circle',
-            source: 'trasy',
-            minzoom: 14,
-            filter: ['==', ['get', 'type'], 'stop'],
-            paint: { 'circle-radius': 4, 'circle-color': '#58d68d', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 }
-        });
-
-        map.addLayer({
-            id: 'stops-text-layer',
-            type: 'symbol',
-            source: 'trasy',
-            minzoom: 14,
-            filter: ['all', ['==', ['get', 'type'], 'stop'], ['==', ['get', 'show_label'], true]],
-            layout: {
-                'text-field': ['get', 'name'],
-                'text-size': 12,
-                'text-anchor': 'bottom',
-                'text-offset': [0, -0.6]
-            },
-            paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
-        });
+        map.addSource('trasy', { type: 'geojson', data: geojsonData, maxzoom: 20, tolerance: 0.5 });
+        map.addLayer({ id: 'lines-layer', type: 'line', source: 'trasy', filter: ['!=', ['geometry-type'], 'Point'], paint: { 'line-color': ['get', 'color'], 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6], 'line-opacity': 0.9 } });
+        map.addLayer({ id: 'badges-layer', type: 'symbol', source: 'trasy', filter: ['==', ['get', 'type'], 'badge'], layout: { 'icon-image': ['get', 'iconId'], 'icon-allow-overlap': false, 'icon-ignore-placement': false } });
+        map.addLayer({ id: 'stops-layer', type: 'circle', source: 'trasy', minzoom: 14, filter: ['==', ['get', 'type'], 'stop'], paint: { 'circle-radius': 4, 'circle-color': '#58d68d', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1.5 } });
+        map.addLayer({ id: 'stops-text-layer', type: 'symbol', source: 'trasy', minzoom: 14, filter: ['all', ['==', ['get', 'type'], 'stop'], ['==', ['get', 'show_label'], true]], layout: { 'text-field': ['get', 'name'], 'text-size': 12, 'text-anchor': 'bottom', 'text-offset': [0, -0.6] }, paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 } });
 
         try {
-            const stopsUrl = 'https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime();
-            const stopsRes = await fetch(stopsUrl, { cache: 'no-store' });
+            const stopsRes = await fetch('https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime(), { cache: 'no-store' });
             if (stopsRes.ok) {
-                const stopsText = await stopsRes.text();
-                const lines = stopsText.split(/\r?\n/);
+                const stopsText = await stopsRes.text(); const lines = stopsText.split(/\r?\n/);
                 if (lines.length > 0) {
-                    let headerLine = lines[0].replace(/^\uFEFF/, '').trim(); 
-                    let delimiter = headerLine.includes('\t') ? '\t' : (headerLine.includes(';') ? ';' : ',');
-                    
-                    const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().toLowerCase().replace(/^"|"$/g, ''));
-                    
-                    const latIdx = headers.indexOf('stop_lat');
-                    const lonIdx = headers.indexOf('stop_lon');
-                    const nameIdx = headers.indexOf('stop_name');
-                    const zoneIdx = headers.indexOf('zone_id'); 
-
+                    let hLine = lines[0].replace(/^\uFEFF/, '').trim(); let delim = hLine.includes('\t') ? '\t' : (hLine.includes(';') ? ';' : ',');
+                    const heads = parseCSVLine(hLine, delim).map(h => h.trim().toLowerCase().replace(/^"|"$/g, ''));
+                    const latIdx = heads.indexOf('stop_lat'), lonIdx = heads.indexOf('stop_lon'), nameIdx = heads.indexOf('stop_name'), zoneIdx = heads.indexOf('zone_id'); 
                     if (latIdx > -1 && lonIdx > -1 && nameIdx > -1) {
                         const vdvStopsGeoJson = { type: 'FeatureCollection', features: [] };
                         for (let i = 1; i < lines.length; i++) {
-                            const line = lines[i].trim();
-                            if (!line) continue;
-                            
-                            const cols = parseCSVLine(line, delimiter);
-                            const latStr = (cols[latIdx] || '').replace(',', '.'); 
-                            const lonStr = (cols[lonIdx] || '').replace(',', '.');
-                            const lat = parseFloat(latStr);
-                            const lon = parseFloat(lonStr);
-                            let name = cols[nameIdx] || "";
-                            
-                            let zoneStr = zoneIdx > -1 ? (cols[zoneIdx] || "").trim().replace(/^"|"$/g, '') : "";
-                            let displayName = name;
-                            if (zoneStr) {
-                                displayName += `\n(Zóna ${zoneStr})`;
-                            }
-                            
-                            if (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-                                vdvStopsGeoJson.features.push({
-                                    type: 'Feature',
-                                    geometry: { type: 'Point', coordinates: [lon, lat] },
-                                    properties: { 
-                                        name: displayName, 
-                                        rawName: name,
-                                        zone: zoneStr
-                                    }
-                                });
-                            }
+                            const l = lines[i].trim(); if (!l) continue;
+                            const c = parseCSVLine(l, delim); const lat = parseFloat((c[latIdx]||'').replace(',', '.')), lon = parseFloat((c[lonIdx]||'').replace(',', '.'));
+                            let name = c[nameIdx] || ""; let zoneStr = zoneIdx > -1 ? (c[zoneIdx] || "").trim().replace(/^"|"$/g, '') : "";
+                            let dName = name + (zoneStr ? `\n(Zóna ${zoneStr})` : "");
+                            if (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) vdvStopsGeoJson.features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { name: dName, rawName: name, zone: zoneStr } });
                         }
-
-                        map.addSource('vdv-stops', { 
-                            type: 'geojson', 
-                            data: vdvStopsGeoJson,
-                            tolerance: 0.5 
-                        });
-
-                        const visibility = activeRouteGroups.length === 0 ? 'visible' : 'none';
-
-                        map.addLayer({
-                            id: 'vdv-stops-layer',
-                            type: 'circle',
-                            source: 'vdv-stops',
-                            minzoom: 15,
-                            layout: { 'visibility': visibility },
-                            paint: { 
-                                'circle-radius': 5, 
-                                'circle-color': '#ffffff', 
-                                'circle-stroke-color': '#9b59b6', 
-                                'circle-stroke-width': 2 
-                            }
-                        });
-
-                        map.addLayer({
-                            id: 'vdv-stops-text-layer',
-                            type: 'symbol',
-                            source: 'vdv-stops',
-                            minzoom: 15,
-                            layout: {
-                                'visibility': visibility,
-                                'text-field': ['get', 'name'],
-                                'text-size': 12,
-                                'text-anchor': 'bottom',
-                                'text-offset': [0, -0.8]
-                            },
-                            paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
-                        });
+                        map.addSource('vdv-stops', { type: 'geojson', data: vdvStopsGeoJson, tolerance: 0.5 });
+                        const vis = activeRouteGroups.length === 0 ? 'visible' : 'none';
+                        map.addLayer({ id: 'vdv-stops-layer', type: 'circle', source: 'vdv-stops', minzoom: 15, layout: { 'visibility': vis }, paint: { 'circle-radius': 5, 'circle-color': '#ffffff', 'circle-stroke-color': '#9b59b6', 'circle-stroke-width': 2 } });
+                        map.addLayer({ id: 'vdv-stops-text-layer', type: 'symbol', source: 'vdv-stops', minzoom: 15, layout: { 'visibility': vis, 'text-field': ['get', 'name'], 'text-size': 12, 'text-anchor': 'bottom', 'text-offset': [0, -0.8] }, paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 } });
                     }
                 }
             }
-        } catch(e) { console.warn("vdv stops.txt nenalezeno nebo chyba parsování", e); }
+        } catch(e) {}
 
         map.addSource('trip-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-        map.addLayer({
-            id: 'trip-route-layer',
-            type: 'line',
-            source: 'trip-route',
-            paint: { 'line-color': '#00e5ff', 'line-width': 5, 'line-opacity': 1 }
-        });
-
+        map.addLayer({ id: 'trip-route-layer', type: 'line', source: 'trip-route', paint: { 'line-color': '#00e5ff', 'line-width': 5, 'line-opacity': 1 } });
         map.addSource('vehicles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-        map.addLayer({
-            id: 'vehicles-layer',
-            type: 'symbol',
-            source: 'vehicles',
-            layout: {
-                'icon-image': ['get', 'iconId'],
-                'icon-allow-overlap': true,
-                'icon-ignore-placement': true
-            }
-        });
+        map.addLayer({ id: 'vehicles-layer', type: 'symbol', source: 'vehicles', layout: { 'icon-image': ['get', 'iconId'], 'icon-allow-overlap': true, 'icon-ignore-placement': true } });
 
-        if (isRealtimeMode) toggleRealtimeMode(true);
-        else if (activeRouteGroups.length > 0) highlightRoute(activeRouteGroups);
-
-    } catch(e) { 
-        console.error("Kritická chyba při načítání dat mapy:", e); 
-    } finally {
-        const loader = document.getElementById('loading');
-        if (loader) loader.style.display = 'none';
-    }
+        if (isRealtimeMode) toggleRealtimeMode(true); else if (activeRouteGroups.length > 0) highlightRoute(activeRouteGroups);
+    } catch(e) { console.error("Chyba načítání mapy:", e); } 
+    finally { const loader = document.getElementById('loading'); if (loader) loader.style.display = 'none'; }
 });
 
 function highlightRoute(groups) {
     activeRouteGroups = Array.isArray(groups) ? groups.map(String) : (groups ? [String(groups)] : []);
-    
     if (map.getLayer('lines-layer')) {
-        if (activeRouteGroups.length === 0) {
+        if (!activeRouteGroups.length) {
             map.setPaintProperty('lines-layer', 'line-opacity', isRealtimeMode ? 0.10 : 0.9);
             map.setPaintProperty('lines-layer', 'line-width', ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6]);
             map.setPaintProperty('badges-layer', 'icon-opacity', isRealtimeMode ? 0 : 1);
             if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-color', isRealtimeMode ? '#444444' : '#ffffff');
-            
             if (map.getLayer('vdv-stops-layer')) map.setLayoutProperty('vdv-stops-layer', 'visibility', 'visible');
             if (map.getLayer('vdv-stops-text-layer')) map.setLayoutProperty('vdv-stops-text-layer', 'visibility', 'visible');
         } else {
-            const matchOpacity = ['match', ['to-string', ['get', 'group']]];
-            activeRouteGroups.forEach(g => matchOpacity.push(String(g), 1));
-            matchOpacity.push(0.10); 
-            
-            const matchWidth = ['match', ['to-string', ['get', 'group']]];
-            activeRouteGroups.forEach(g => matchWidth.push(String(g), 6));
-            matchWidth.push(3); 
-            
-            const matchBadge = ['match', ['to-string', ['get', 'group']]];
-            activeRouteGroups.forEach(g => matchBadge.push(String(g), 1));
-            matchBadge.push(0); 
-            
-            map.setPaintProperty('lines-layer', 'line-opacity', matchOpacity);
-            map.setPaintProperty('lines-layer', 'line-width', matchWidth);
-            map.setPaintProperty('badges-layer', 'icon-opacity', matchBadge);
-            
-            if (map.getLayer('zeleznice-layer')) {
-                map.setPaintProperty('zeleznice-layer', 'line-color', activeRouteGroups.includes('000') ? '#ffffff' : '#444444');
-            }
-
+            const mOp = ['match', ['to-string', ['get', 'group']]]; activeRouteGroups.forEach(g => mOp.push(String(g), 1)); mOp.push(0.10); 
+            const mWi = ['match', ['to-string', ['get', 'group']]]; activeRouteGroups.forEach(g => mWi.push(String(g), 6)); mWi.push(3); 
+            const mBa = ['match', ['to-string', ['get', 'group']]]; activeRouteGroups.forEach(g => mBa.push(String(g), 1)); mBa.push(0); 
+            map.setPaintProperty('lines-layer', 'line-opacity', mOp); map.setPaintProperty('lines-layer', 'line-width', mWi); map.setPaintProperty('badges-layer', 'icon-opacity', mBa);
+            if (map.getLayer('zeleznice-layer')) map.setPaintProperty('zeleznice-layer', 'line-color', activeRouteGroups.includes('000') ? '#ffffff' : '#444444');
             if (map.getLayer('vdv-stops-layer')) map.setLayoutProperty('vdv-stops-layer', 'visibility', 'none');
             if (map.getLayer('vdv-stops-text-layer')) map.setLayoutProperty('vdv-stops-text-layer', 'visibility', 'none');
         }
@@ -643,699 +305,256 @@ function highlightRoute(groups) {
 }
 
 map.on('click', (e) => {
-    const vFeatures = map.queryRenderedFeatures(e.point, { layers: ['vehicles-layer'] });
-    const lineFeatures = isRealtimeMode ? [] : map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
-
-    if (!vFeatures.length && !lineFeatures.length) {
-        const hadLine = activeRouteGroups.length > 0;
-        const hadVehicle = selectedVehicleId !== null;
-
-        if (hadLine || hadVehicle) {
-            if (hadLine) {
-                if (isRealtimeMode) toggleRealtimeMode(false);
-                else highlightRoute([]);
-            } else {
-                selectedVehicleId = null;
-                map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-                document.getElementById('mobile-bottom-bar').classList.add('hidden');
-                if (currentPopup) currentPopup.remove();
-                updateURL();
-            }
+    const vF = map.queryRenderedFeatures(e.point, { layers: ['vehicles-layer'] });
+    const lF = isRealtimeMode ? [] : map.queryRenderedFeatures(e.point, { layers: ['lines-layer', 'badges-layer'] });
+    if (!vF.length && !lF.length) {
+        if (activeRouteGroups.length || selectedVehicleId !== null) {
+            if (activeRouteGroups.length) { if (isRealtimeMode) toggleRealtimeMode(false); else highlightRoute([]); } 
+            else { selectedVehicleId = null; map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] }); document.getElementById('mobile-bottom-bar').classList.add('hidden'); if (currentPopup) currentPopup.remove(); updateURL(); }
         }
-    } else if (vFeatures.length) {
-        handleVehicleClick(vFeatures[0].properties);
-    } else if (lineFeatures.length) {
-        const group = String(lineFeatures[0].properties.group);
-        highlightRoute([group]); 
-        toggleRealtimeMode(true); 
-    }
+    } else if (vF.length) handleVehicleClick(vF[0].properties);
+    else if (lF.length) { highlightRoute([String(lF[0].properties.group)]); toggleRealtimeMode(true); }
 });
 
-map.on('mouseenter', 'vehicles-layer', () => map.getCanvas().style.cursor = 'pointer');
-map.on('mouseleave', 'vehicles-layer', () => map.getCanvas().style.cursor = '');
-map.on('mouseenter', 'lines-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
-map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
-map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
-map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
+map.on('mouseenter', 'vehicles-layer', () => map.getCanvas().style.cursor = 'pointer'); map.on('mouseleave', 'vehicles-layer', () => map.getCanvas().style.cursor = '');
+map.on('mouseenter', 'lines-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; }); map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
+map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; }); map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE ---
-let cachedVehicleId = null;
-let cachedInfoRaw = null;
-let cachedTimetableRaw = null;
+let cachedVehicleId = null, cachedInfoRaw = null, cachedTimetableRaw = null;
 
 window.openTimetable = async function(vehicleId, delayInMinutes) {
-    const modalContent = document.getElementById('timetable-modal-content');
-    const modal = document.getElementById('timetable-modal');
-
-    if (modal.classList.contains('hidden')) {
-        modalContent.innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
-        modal.classList.remove('hidden');
-    }
-    
-    isTimetableOpen = true;
-    updateURL();
-
+    const modalContent = document.getElementById('timetable-modal-content'); const modal = document.getElementById('timetable-modal');
+    if (modal.classList.contains('hidden')) { modalContent.innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>"; modal.classList.remove('hidden'); }
+    isTimetableOpen = true; updateURL();
     try {
         let rawHtml;
-        if (cachedVehicleId === vehicleId && cachedTimetableRaw) {
-            rawHtml = cachedTimetableRaw;
-        } else {
-            rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`);
-            cachedTimetableRaw = rawHtml;
-            cachedVehicleId = vehicleId;
-        }
-
-        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()');
-        cleanHtml = fixCommasInHtml(cleanHtml);
-        
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = cleanHtml;
-
-        removeWheelchairInfo(tempDiv);
-
-        const legend = tempDiv.querySelector('#timetableColorsLegend');
-        if (legend) {
-            const bottomRow = legend.closest('.columns');
-            if (bottomRow) bottomRow.remove();
-        }
-        
+        if (cachedVehicleId === vehicleId && cachedTimetableRaw) rawHtml = cachedTimetableRaw;
+        else { rawHtml = await fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${vehicleId}&currentStopId=0`); cachedTimetableRaw = rawHtml; cachedVehicleId = vehicleId; }
+        let cleanHtml = rawHtml.replace(/inflow\.InfoWindow\.closeTimetable\(\)/g, 'closeTimetable()'); cleanHtml = fixCommasInHtml(cleanHtml);
+        const tempDiv = document.createElement('div'); tempDiv.innerHTML = cleanHtml; removeWheelchairInfo(tempDiv);
+        const legend = tempDiv.querySelector('#timetableColorsLegend'); if (legend) { const botRow = legend.closest('.columns'); if (botRow) botRow.remove(); }
         if (delayInMinutes !== undefined && delayInMinutes !== null && delayInMinutes !== -2147483648) {
             const headerRight = tempDiv.querySelector('.level-right .level-item');
             if (headerRight) {
                 let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
                 let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Bez zpoždění');
-                const delaySpan = document.createElement('span');
-                delaySpan.style.marginLeft = "15px";
-                delaySpan.innerHTML = `Zpoždění: <b style="color:${delayClass}">${delayText}</b>`;
-                headerRight.appendChild(delaySpan);
+                const delaySpan = document.createElement('span'); delaySpan.style.marginLeft = "15px"; delaySpan.innerHTML = `Zpoždění: <b style="color:${delayClass}">${delayText}</b>`; headerRight.appendChild(delaySpan);
             }
-            
             if (delayInMinutes !== 0) {
-                const timeCells = tempDiv.querySelectorAll('td.has-text-centered');
-                timeCells.forEach(cell => {
-                    const timeMatch = cell.innerText.match(/^(\d{1,2}):(\d{2})$/);
-                    if (timeMatch) {
-                        let h = parseInt(timeMatch[1], 10), m = parseInt(timeMatch[2], 10);
-                        let totalMin = h * 60 + m + delayInMinutes;
-                        if (totalMin < 0) totalMin += 24 * 60; 
-                        let newH = Math.floor(totalMin / 60) % 24, newM = totalMin % 60;
-                        let newTimeStr = `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}`;
+                tempDiv.querySelectorAll('td.has-text-centered').forEach(cell => {
+                    const tMatch = cell.innerText.match(/^(\d{1,2}):(\d{2})$/);
+                    if (tMatch) {
+                        let totalMin = parseInt(tMatch[1], 10) * 60 + parseInt(tMatch[2], 10) + delayInMinutes; if (totalMin < 0) totalMin += 24 * 60; 
+                        let newTimeStr = `${String(Math.floor(totalMin / 60) % 24).padStart(2, '0')}:${String(totalMin % 60).padStart(2, '0')}`;
                         let colorClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
                         cell.innerHTML = `<s style="color:#666; font-size: 11px; margin-right: 4px;">${cell.innerText}</s><span style="color:${colorClass}">${newTimeStr}</span>`;
                     }
                 });
             }
         }
-
-        tempDiv.querySelectorAll('tr').forEach(tr => {
-            if (tr.firstElementChild) {
-                tr.firstElementChild.style.whiteSpace = 'nowrap';
-            }
-        });
-
-        const currentScroll = modalContent.scrollTop;
-        modalContent.innerHTML = tempDiv.innerHTML;
-        modalContent.scrollTop = currentScroll;
-
+        tempDiv.querySelectorAll('tr').forEach(tr => { if (tr.firstElementChild) tr.firstElementChild.style.whiteSpace = 'nowrap'; });
+        const currentScroll = modalContent.scrollTop; modalContent.innerHTML = tempDiv.innerHTML; modalContent.scrollTop = currentScroll;
     } catch(e) { modalContent.innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
 window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
-    const modalContent = document.getElementById('timetable-modal-content');
-    const modal = document.getElementById('timetable-modal');
-
-    if (modal.classList.contains('hidden')) {
-        modalContent.innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
-        modal.classList.remove('hidden');
-    }
-    isTimetableOpen = true;
-    updateURL();
-
+    const modalContent = document.getElementById('timetable-modal-content'); const modal = document.getElementById('timetable-modal');
+    if (modal.classList.contains('hidden')) { modalContent.innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>"; modal.classList.remove('hidden'); }
+    isTimetableOpen = true; updateURL();
     try {
-        const url = `https://hoermalmeister.github.io/hb-mhd-bridge/hb-timetables/${vdvLine}_${runNumber}.json`;
-        const res = await fetch(url);
+        const res = await fetch(`https://hoermalmeister.github.io/hb-mhd-bridge/hb-timetables/${vdvLine}_${runNumber}.json`);
         if (!res.ok) throw new Error("Jízdní řád nenalezen");
         const stops = await res.json();
-
         let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
         let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Bez zpoždění');
-        
-        let delaySpanHtml = (delayInMinutes !== null && delayInMinutes !== undefined)
-            ? `<span style="margin-left: 15px;">Zpoždění: <b style="color:${delayClass}">${delayText}</b></span>`
-            : "";
-
-        // Plně sjednocený HTML kód odpovídající Krajským VDV pop-upům
+        let delaySpanHtml = (delayInMinutes !== null && delayInMinutes !== undefined && delayInMinutes !== -2147483648) ? `<span style="margin-left: 15px;">Zpoždění: <b style="color:${delayClass}">${delayText}</b></span>` : "";
         let html = `
-        <div class="field">
-            <nav class="level is-mobile mb-2">
-                <div class="level-left">
-                    <div class="level-item">
-                        <button class="button is-small" onclick="closeTimetable()">
-                            <span class="icon is-small">
-                                <i class="fas fa-arrow-left"></i>
-                            </span>
-                            <span>Zpět</span>
-                        </button>
-                    </div>
-                </div>
-                <div class="level-right">
-                    <div class="level-item" style="margin-right: 15px;">
-                        <span style="font-weight:bold;margin-right: 10px;">Linkospoj:</span>
-                        <span id="currentLineRouteLabel">${vdvLine} / ${runNumber}</span>
-                        <span id="nextLineRouteLabel" class="is-hidden">-- / --</span>
-                        ${delaySpanHtml}
-                    </div>
-                </div>
-            </nav>
-
-            <div class="field" id="timetableCurrentContainer">
-                <table class="table is-striped is-fullwidth">
-                    <thead>
-                        <tr>
-                            <th style="white-space: nowrap;">Zastávka</th>
-                            <th class="has-text-centered" style="width:100px">Příjezd</th>
-                            <th class="has-text-centered" style="width:100px">Odjezd</th>
-                        </tr>
-                    </thead>
-                    <tbody>`;
-
+        <div class="field"><nav class="level is-mobile mb-2"><div class="level-left"><div class="level-item"><button class="button is-small" onclick="closeTimetable()"><span class="icon is-small"><i class="fas fa-arrow-left"></i></span><span>Zpět</span></button></div></div><div class="level-right"><div class="level-item" style="margin-right: 15px;"><span style="font-weight:bold;margin-right: 10px;">Linkospoj:</span><span id="currentLineRouteLabel">${vdvLine} / ${runNumber}</span><span id="nextLineRouteLabel" class="is-hidden">-- / --</span>${delaySpanHtml}</div></div></nav>
+        <div class="field" id="timetableCurrentContainer"><table class="table is-striped is-fullwidth"><thead><tr><th style="white-space: nowrap;">Zastávka</th><th class="has-text-centered" style="width:100px">Příjezd</th><th class="has-text-centered" style="width:100px">Odjezd</th></tr></thead><tbody>`;
         stops.forEach(s => {
-            let depHtml = s.dep;
-            let arrHtml = s.arr;
-
-            if (delayInMinutes !== 0 && delayInMinutes !== null && delayInMinutes !== undefined) {
-                const applyDelay = (timeStr) => {
-                    if (!timeStr || timeStr.trim() === "") return "";
-                    const parts = timeStr.split(':');
-                    if(parts.length !== 2) return timeStr;
-                    let totalMin = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + delayInMinutes;
-                    if (totalMin < 0) totalMin += 24 * 60;
-                    let newH = Math.floor(totalMin / 60) % 24;
-                    let newM = totalMin % 60;
-                    let cClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
-                    return `<s style="color:#666; font-size: 11px; margin-right: 4px;">${timeStr}</s><span style="color:${cClass}">${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}</span>`;
+            let depHtml = s.dep, arrHtml = s.arr;
+            if (delayInMinutes !== 0 && delayInMinutes !== null && delayInMinutes !== undefined && delayInMinutes !== -2147483648) {
+                const applyDelay = (tStr) => {
+                    if (!tStr || tStr.trim() === "") return ""; const p = tStr.split(':'); if(p.length !== 2) return tStr;
+                    let tMin = parseInt(p[0], 10) * 60 + parseInt(p[1], 10) + delayInMinutes; if (tMin < 0) tMin += 24 * 60;
+                    let cCls = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
+                    return `<s style="color:#666; font-size: 11px; margin-right: 4px;">${tStr}</s><span style="color:${cCls}">${String(Math.floor(tMin/60)%24).padStart(2, '0')}:${String(tMin%60).padStart(2, '0')}</span>`;
                 };
-                depHtml = applyDelay(s.dep);
-                arrHtml = applyDelay(s.arr);
+                depHtml = applyDelay(s.dep); arrHtml = applyDelay(s.arr);
             }
-
-            html += `<tr>
-                <td style="white-space: nowrap;">${s.name}</td>
-                <td class="has-text-centered">${arrHtml}</td>
-                <td class="has-text-centered">${depHtml}</td>
-            </tr>`;
+            html += `<tr><td style="white-space: nowrap;">${s.name}</td><td class="has-text-centered">${arrHtml}</td><td class="has-text-centered">${depHtml}</td></tr>`;
         });
-        
-        html += `</tbody></table></div></div>`;
-        modalContent.innerHTML = html;
-
+        html += `</tbody></table></div></div>`; modalContent.innerHTML = html;
     } catch (e) {
-        modalContent.innerHTML = `
-        <div class="field">
-            <nav class="level is-mobile mb-2">
-                <div class="level-left">
-                    <div class="level-item">
-                        <button class="button is-small" onclick="closeTimetable()">
-                            <span class="icon is-small"><i class="fas fa-arrow-left"></i></span><span>Zpět</span>
-                        </button>
-                    </div>
-                </div>
-            </nav>
-            <div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div>
-        </div>`;
+        modalContent.innerHTML = `<div class="field"><nav class="level is-mobile mb-2"><div class="level-left"><div class="level-item"><button class="button is-small" onclick="closeTimetable()"><span class="icon is-small"><i class="fas fa-arrow-left"></i></span><span>Zpět</span></button></div></div></nav><div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div></div>`;
     }
 };
 
-window.closeTimetable = function() { 
-    document.getElementById('timetable-modal').classList.add('hidden'); 
-    isTimetableOpen = false;
-    updateURL();
-};
+window.closeTimetable = function() { document.getElementById('timetable-modal').classList.add('hidden'); isTimetableOpen = false; updateURL(); };
 
 let currentPopup = null;
-
 async function handleVehicleClick(v) {
-    selectedVehicleId = v.id;
-    updateURL();
-
+    selectedVehicleId = v.id; updateURL();
     const isJihlava = v.isJihlava === true || v.isJihlava === 'true';
     const isHB = v.isHB === true || v.isHB === 'true';
 
-    // === HAVLÍČKŮV BROD DETAIL ===
     if (isHB) {
-        const timetableUrl = `https://hoermalmeister.github.io/hb-mhd-bridge/hb-timetables/${v.vdvLine}_${v.runNumber}.json`;
-        
         try {
-            const ttRes = await fetch(timetableUrl);
+            const ttRes = await fetch(`https://hoermalmeister.github.io/hb-mhd-bridge/hb-timetables/${v.vdvLine}_${v.runNumber}.json`);
             if (ttRes.ok) {
-                const stops = await ttRes.json();
-                const routeCoords = stops.filter(s => s.lat && s.lon).map(s => [s.lon, s.lat]);
-                if (routeCoords.length > 1) {
-                    map.getSource('trip-route').setData({
-                        type: 'Feature',
-                        geometry: { type: 'LineString', coordinates: routeCoords }
-                    });
-                } else {
-                    map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-                }
-            } else {
-                map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-            }
-        } catch (e) {
-            map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-        }
-
+                const stops = await ttRes.json(); const routeCoords = stops.filter(s => s.lat && s.lon).map(s => [s.lon, s.lat]);
+                if (routeCoords.length > 1) map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: routeCoords } });
+                else map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+            } else map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+        } catch (e) { map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] }); }
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
-        
-        // Zcela identický kód popup okna jako u VDV 
-        let html = `
-            <div class="table-container">
-                <table class="table is-striped is-fullwidth" style="margin-bottom: 0;">
-                    <tbody>
-                        <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.vdvLine}</td></tr>
-                        <tr><th style="white-space: nowrap;">Spoj</th><td>${v.runNumber}</td></tr>
-                        <tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr>
-                        <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
-                        <tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr>
-                    </tbody>
-                </table>
-                <button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})" style="margin-top: 5px;">
-                    <span class="icon is-small">
-                        <i class="fas fa-table"></i>
-                    </span>
-                    <span>Jízdní řád</span>
-                </button>
-            </div>
-        `;
+        if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
 
+        let html = `<div class="table-container"><table class="table is-striped is-fullwidth" style="margin-bottom: 0;"><tbody><tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.vdvLine}</td></tr><tr><th style="white-space: nowrap;">Spoj</th><td>${v.runNumber}</td></tr><tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr><tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr><tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr></tbody></table><button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})" style="margin-top: 5px;"><span class="icon is-small"><i class="fas fa-table"></i></span><span>Jízdní řád</span></button></div>`;
         if (window.innerWidth <= 768) {
-            const bar = document.getElementById('mobile-bottom-bar');
-            document.getElementById('mobile-bar-content').innerHTML = html;
-            bar.classList.remove('hidden');
-            bar.onclick = function(e) { 
-                if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
-                    if (html.includes('openHbTimetable')) {
-                        openHbTimetable(v.vdvLine, v.runNumber, v.delay); 
-                    }
-                } 
-            };
+            const bar = document.getElementById('mobile-bottom-bar'); document.getElementById('mobile-bar-content').innerHTML = html; bar.classList.remove('hidden');
+            bar.onclick = function(e) { if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) if (html.includes('openHbTimetable')) openHbTimetable(v.vdvLine, v.runNumber, v.delay); };
         } else {
-            if (currentPopup && currentPopup.isOpen()) {
-                currentPopup.setLngLat([v.lng, v.lat]).setHTML(html);
-            } else {
-                if (currentPopup) currentPopup.remove();
-                currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(html).addTo(map);
-            }
+            if (currentPopup && currentPopup.isOpen()) currentPopup.setLngLat([v.lng, v.lat]).setHTML(html);
+            else { if (currentPopup) currentPopup.remove(); currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(html).addTo(map); }
         }
         return;
     }
 
-    // === Jihlava detail ===
     if (isJihlava) {
         let multiLineCoords = [];
-        if (geojsonData) {
-            geojsonData.features.forEach(f => {
-                if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === String(v.shortLine)) {
-                    if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
-                    else multiLineCoords.push(...f.geometry.coordinates);
-                }
-            });
-        }
-
-        if (multiLineCoords.length > 0) {
-            map.getSource('trip-route').setData({
-                type: 'Feature',
-                geometry: { type: 'MultiLineString', coordinates: multiLineCoords }
-            });
-        } else {
-            map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-        }
+        if (geojsonData) geojsonData.features.forEach(f => {
+            if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === String(v.shortLine)) {
+                if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates); else multiLineCoords.push(...f.geometry.coordinates);
+            }
+        });
+        if (multiLineCoords.length > 0) map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'MultiLineString', coordinates: multiLineCoords } });
+        else map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
         
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
         
-        let formattedStopName = (v.finalStopName || "").replace(/,(?=[^\s])/g, ', ');
-        let formattedLastStop = (v.lastStop || "").replace(/,(?=[^\s])/g, ', ');
-        
-        let html = `
-            <div>
-                <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
-                    <tbody>
-                        <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.text}</td></tr>
-                        <tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${formattedStopName}</td></tr>
-                        <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
-                        <tr><th style="white-space: nowrap;">Zastávka</th><td>${formattedLastStop}</td></tr>
-                    </tbody>
-                </table>
-                <div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Jihlava</div>
-            </div>
-        `;
-
+        let formattedStopName = (v.finalStopName || "").replace(/,(?=[^\s])/g, ', '); let formattedLastStop = (v.lastStop || "").replace(/,(?=[^\s])/g, ', ');
+        let html = `<div><table class="table is-narrow is-fullwidth" style="margin-bottom: 0;"><tbody><tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.text}</td></tr><tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${formattedStopName}</td></tr><tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr><tr><th style="white-space: nowrap;">Zastávka</th><td>${formattedLastStop}</td></tr></tbody></table><div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Jihlava</div></div>`;
         if (window.innerWidth <= 768) {
-            const bar = document.getElementById('mobile-bottom-bar');
-            document.getElementById('mobile-bar-content').innerHTML = html;
-            bar.classList.remove('hidden');
-            bar.onclick = null;
+            const bar = document.getElementById('mobile-bottom-bar'); document.getElementById('mobile-bar-content').innerHTML = html; bar.classList.remove('hidden'); bar.onclick = null;
         } else {
-            if (currentPopup && currentPopup.isOpen()) {
-                currentPopup.setLngLat([v.lng, v.lat]).setHTML(html);
-            } else {
-                if (currentPopup) currentPopup.remove();
-                currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(html).addTo(map);
-            }
+            if (currentPopup && currentPopup.isOpen()) currentPopup.setLngLat([v.lng, v.lat]).setHTML(html);
+            else { if (currentPopup) currentPopup.remove(); currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(html).addTo(map); }
         }
         return;
     }
 
-    // === Kraj detail ===
-    const isTrain = v.traction === 'TRAIN';
-    const vTextStr = String(v.text || '');
-    const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
-    
-    const isNonVDV = vTextStr.startsWith('620') || 
-                     vTextStr.startsWith('35500') || 
-                     vTextStr.startsWith('84500') || 
-                     ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
+    const isTrain = v.traction === 'TRAIN'; const vTextStr = String(v.text || ''); const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
+    const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
 
     try {
         let infoRaw, timetableRaw;
-        if (cachedVehicleId === v.id && cachedInfoRaw && cachedTimetableRaw) {
-            infoRaw = cachedInfoRaw;
-            timetableRaw = cachedTimetableRaw;
-        } else {
-            const [iRes, tRes] = await Promise.all([
-                fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`),
-                fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${v.id}&currentStopId=0`)
-            ]);
-            infoRaw = iRes;
-            timetableRaw = tRes;
-            cachedInfoRaw = infoRaw;
-            cachedTimetableRaw = timetableRaw;
-            cachedVehicleId = v.id;
-            
+        if (cachedVehicleId === v.id && cachedInfoRaw && cachedTimetableRaw) { infoRaw = cachedInfoRaw; timetableRaw = cachedTimetableRaw; } 
+        else {
+            const [iRes, tRes] = await Promise.all([ fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/OpenInfoWindow?id=${v.id}`), fetchKrajskeHtml(`https://mapavdv.kr-vysocina.cz/Ajax/GetTimetable?vehicleNumber=${v.id}&currentStopId=0`) ]);
+            infoRaw = iRes; timetableRaw = tRes; cachedInfoRaw = infoRaw; cachedTimetableRaw = timetableRaw; cachedVehicleId = v.id;
             map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
             if (!isNonVDV) {
                 if (!isTrain && geojsonData) {
                     let multiLineCoords = [];
-                    geojsonData.features.forEach(f => {
-                        if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) {
-                            if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates);
-                            else multiLineCoords.push(...f.geometry.coordinates);
-                        }
-                    });
-
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(timetableRaw, 'text/html');
-                    const labelSpan = doc.getElementById('currentLineRouteLabel');
-                    
-                    let linka = "", spoj = "";
-                    if (labelSpan) {
-                        const parts = labelSpan.innerText.split('/');
-                        if(parts.length >= 1) linka = parts[0].trim();
-                        if(parts.length >= 2) spoj = parts[1].trim();
-                    }
-
-                    let firstTime = "";
-                    const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
-                    if (firstTimeCell) {
-                        const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/);
-                        if (timeMatch) firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; 
-                    }
-
-                    const vdvKey = `${linka}/${spoj}`;
-                    const pidKey = `${linka}/PID${firstTime}`;
-
-                    const rawCoords = tripShapes[vdvKey] || tripShapes[pidKey]; 
-
-                    if (rawCoords && rawCoords.length > 1) {
-                        const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } };
-                        map.getSource('trip-route').setData(geoJsonLine);
-                    } else {
-                        const stopCells = doc.querySelectorAll('tbody tr td:first-child');
-                        let stopCoords = [];
-                        let previousCoord = null;
-
-                        stopCells.forEach(cell => {
-                            const normName = normalizeStopName(cell.innerText);
-                            const bestCoord = findBestStop(normName, multiLineCoords, previousCoord);
-                            if (bestCoord) { stopCoords.push(bestCoord); previousCoord = bestCoord; }
-                        });
-
+                    geojsonData.features.forEach(f => { if ((f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') && String(f.properties.group) === routeToHighlight) { if (f.geometry.type === 'LineString') multiLineCoords.push(f.geometry.coordinates); else multiLineCoords.push(...f.geometry.coordinates); } });
+                    const doc = new DOMParser().parseFromString(timetableRaw, 'text/html'); const labelSpan = doc.getElementById('currentLineRouteLabel');
+                    let linka = "", spoj = ""; if (labelSpan) { const parts = labelSpan.innerText.split('/'); if(parts.length >= 1) linka = parts[0].trim(); if(parts.length >= 2) spoj = parts[1].trim(); }
+                    let firstTime = ""; const firstTimeCell = doc.querySelector('tbody tr td.has-text-centered:nth-child(3)') || doc.querySelector('tbody tr td.has-text-centered:nth-child(2)');
+                    if (firstTimeCell) { const timeMatch = firstTimeCell.innerText.match(/(\d{1,2}):(\d{2})/); if (timeMatch) firstTime = String(timeMatch[1]).padStart(2, '0') + timeMatch[2]; }
+                    const rawCoords = tripShapes[`${linka}/${spoj}`] || tripShapes[`${linka}/PID${firstTime}`]; 
+                    if (rawCoords && rawCoords.length > 1) { map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: rawCoords.map(c => [c[1], c[0]]) } }); } 
+                    else {
+                        let stopCoords = [], previousCoord = null;
+                        doc.querySelectorAll('tbody tr td:first-child').forEach(cell => { const bestCoord = findBestStop(normalizeStopName(cell.innerText), multiLineCoords, previousCoord); if (bestCoord) { stopCoords.push(bestCoord); previousCoord = bestCoord; } });
                         if (stopCoords.length > 1) {
                             let finalTripCoords = [stopCoords[0]];
-                            for (let i = 0; i < stopCoords.length - 1; i++) {
-                                let A = stopCoords[i], B = stopCoords[i+1];
-                                let roadPath = getPathBetweenStops(A, B, multiLineCoords);
-                                if (roadPath) finalTripCoords.push(...roadPath);
-                                else finalTripCoords.push(B); 
-                            }
+                            for (let i = 0; i < stopCoords.length - 1; i++) { let roadPath = getPathBetweenStops(stopCoords[i], stopCoords[i+1], multiLineCoords); if (roadPath) finalTripCoords.push(...roadPath); else finalTripCoords.push(stopCoords[i+1]); }
                             map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: finalTripCoords }});
                         }
                     }
                 } else if (isTrain) {
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(timetableRaw, 'text/html');
-                    const stopCells = doc.querySelectorAll('tbody tr td:first-child');
-                    let stopCoords = [];
-
-                    stopCells.forEach(cell => {
-                        let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim();
-                        if (trainStopsMap[rawName]) {
-                            stopCoords.push(trainStopsMap[rawName]);
-                        }
-                    });
-
-                    if (stopCoords.length > 1) {
-                        const geoJsonLine = { type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } };
-                        map.getSource('trip-route').setData(geoJsonLine);
-                    }
+                    const doc = new DOMParser().parseFromString(timetableRaw, 'text/html'); let stopCoords = [];
+                    doc.querySelectorAll('tbody tr td:first-child').forEach(cell => { let rawName = cell.textContent.replace(/[\n\r\t]/g, '').trim(); if (trainStopsMap[rawName]) stopCoords.push(trainStopsMap[rawName]); });
+                    if (stopCoords.length > 1) map.getSource('trip-route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: stopCoords } });
                 }
             }
         }
-
-        let cleanHtml = infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`);
-        cleanHtml = fixCommasInHtml(cleanHtml);
-
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = cleanHtml;
-        removeWheelchairInfo(tempDiv);
-
-        const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
-        let n;
-        let toRemoveDelay = [];
-        while ((n = walkerDelay.nextNode())) {
-            if (n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('zpozdeni')) {
-                let p = n.parentElement;
-                let container = p.closest('.level') || p.closest('.columns') || p.closest('tr') || p.closest('li') || p.closest('p') || p;
-                if (container && !toRemoveDelay.includes(container)) toRemoveDelay.push(container);
-            }
-        }
+        let cleanHtml = fixCommasInHtml(infoRaw.replace(/inflow\.InfoWindow\.loadTimetable\((-?\d+),\s*-?\d+\)/g, `openTimetable($1, ${v.delay})`));
+        const tempDiv = document.createElement('div'); tempDiv.innerHTML = cleanHtml; removeWheelchairInfo(tempDiv);
+        const walkerDelay = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false); let n, toRemoveDelay = [];
+        while ((n = walkerDelay.nextNode())) { if (n.nodeValue.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes('zpozdeni')) { let container = n.parentElement.closest('.level') || n.parentElement.closest('.columns') || n.parentElement.closest('tr') || n.parentElement.closest('li') || n.parentElement.closest('p') || n.parentElement; if (container && !toRemoveDelay.includes(container)) toRemoveDelay.push(container); } }
         toRemoveDelay.forEach(c => c.remove());
-
         if (v.finalStopName && v.finalStopName.trim() !== '' && !/n\/a/i.test(v.finalStopName)) {
             let formattedStopName = v.finalStopName.replace(/,(?=[^\s])/g, ', '); 
-            
-            if (isTrain) {
-                let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i);
-                if (uicMatch) {
-                    formattedStopName = await getStationNameByUIC(uicMatch[1]);
-                }
-            }
-
-            let targetTr = null;
-            tempDiv.querySelectorAll('tr').forEach(tr => {
-                const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-                if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj')) {
-                    targetTr = tr;
-                }
-            });
-            if (targetTr) {
-                const newTr = document.createElement('tr');
-                newTr.innerHTML = `<th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${formattedStopName}</td>`;
-                targetTr.after(newTr);
-            }
+            if (isTrain) { let uicMatch = formattedStopName.match(/^(\d+)\s*N\/a/i); if (uicMatch) formattedStopName = await getStationNameByUIC(uicMatch[1]); }
+            let targetTr = null; tempDiv.querySelectorAll('tr').forEach(tr => { const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(); if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj')) targetTr = tr; });
+            if (targetTr) { const newTr = document.createElement('tr'); newTr.innerHTML = `<th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${formattedStopName}</td>`; targetTr.after(newTr); }
         }
-
         if (v.delay !== -2147483648) {
-            let targetTr = null;
-            tempDiv.querySelectorAll('tr').forEach(tr => {
-                const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-                if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj') || txt.includes('smer')) {
-                    targetTr = tr;
-                }
-            });
+            let targetTr = null; tempDiv.querySelectorAll('tr').forEach(tr => { const txt = tr.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(); if (txt.includes('linka') || txt.includes('vlak') || txt.includes('spoj') || txt.includes('smer')) targetTr = tr; });
             if (targetTr) {
-                let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
-                let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
-                const newTr = document.createElement('tr');
-                newTr.innerHTML = `<th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td>`;
-                targetTr.after(newTr);
+                let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d'); let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
+                const newTr = document.createElement('tr'); newTr.innerHTML = `<th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td>`; targetTr.after(newTr);
             }
         }
-
         if (isTrain) {
-            tempDiv.querySelectorAll('th, td, span, strong, b, div, p').forEach(el => {
-                if (el && el.textContent) {
-                    const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-                    if (txt === 'spoj:' || txt === 'spoj') {
-                        const container = el.closest('tr') || el.closest('.level') || el.closest('.columns') || el.closest('li') || el.closest('p');
-                        if (container) container.remove();
-                    }
-                }
-            });
-
-            const walkerTrain = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false);
-            let n2;
-            while ((n2 = walkerTrain.nextNode())) {
-                if (n2.nodeValue.includes('Linka')) {
-                    n2.nodeValue = n2.nodeValue.replace('Linka', 'Vlak');
-                } else if (n2.nodeValue.includes('linka')) {
-                    n2.nodeValue = n2.nodeValue.replace('linka', 'vlak');
-                }
-            }
+            tempDiv.querySelectorAll('th, td, span, strong, b, div, p').forEach(el => { if (el && el.textContent) { const txt = el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(); if (txt === 'spoj:' || txt === 'spoj') { const container = el.closest('tr') || el.closest('.level') || el.closest('.columns') || el.closest('li') || el.closest('p'); if (container) container.remove(); } } });
+            const walkerTrain = document.createTreeWalker(tempDiv, NodeFilter.SHOW_TEXT, null, false); let n2;
+            while ((n2 = walkerTrain.nextNode())) { if (n2.nodeValue.includes('Linka')) n2.nodeValue = n2.nodeValue.replace('Linka', 'Vlak'); else if (n2.nodeValue.includes('linka')) n2.nodeValue = n2.nodeValue.replace('linka', 'vlak'); }
         }
-
-        const hasValidTimetable = timetableRaw && timetableRaw.toLowerCase().includes('<tr');
-        if (!hasValidTimetable) {
-            tempDiv.querySelectorAll('*').forEach(el => {
-                const onclickAttr = el.getAttribute('onclick') || '';
-                const textContent = el.textContent ? el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : '';
-                
-                if (onclickAttr.includes('openTimetable') || onclickAttr.includes('loadTimetable') || ((el.tagName === 'BUTTON' || el.tagName === 'A') && textContent.includes('jizdni rad'))) {
-                    el.remove();
-                }
-            });
+        if (!(timetableRaw && timetableRaw.toLowerCase().includes('<tr'))) {
+            tempDiv.querySelectorAll('*').forEach(el => { const onclickAttr = el.getAttribute('onclick') || ''; const textContent = el.textContent ? el.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : ''; if (onclickAttr.includes('openTimetable') || onclickAttr.includes('loadTimetable') || ((el.tagName === 'BUTTON' || el.tagName === 'A') && textContent.includes('jizdni rad'))) el.remove(); });
         }
-
         tempDiv.querySelectorAll('tr').forEach(tr => {
-            if (tr.firstElementChild) {
-                tr.firstElementChild.style.whiteSpace = 'nowrap';
-            }
+            if (tr.firstElementChild) tr.firstElementChild.style.whiteSpace = 'nowrap';
             const txt = tr.firstElementChild ? tr.firstElementChild.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim() : "";
-            if (txt === 'linka' || txt === 'vlak' || txt === 'linka:' || txt === 'vlak:' || txt === 'směr' || txt === 'smer' || txt === 'směr:' || txt === 'smer:') {
-                const valueCell = tr.children[1];
-                if (valueCell) {
-                    valueCell.style.fontWeight = 'normal';
-                    valueCell.querySelectorAll('b, strong').forEach(b => b.style.fontWeight = 'normal');
-                }
-            }
+            if (['linka','vlak','linka:','vlak:','směr','smer','směr:','smer:'].includes(txt)) { const valueCell = tr.children[1]; if (valueCell) { valueCell.style.fontWeight = 'normal'; valueCell.querySelectorAll('b, strong').forEach(b => b.style.fontWeight = 'normal'); } }
         });
-
         if (isNonVDV) {
             const table = tempDiv.querySelector('table') || tempDiv.querySelector('tbody');
-            if (table) {
-                const tr = document.createElement('tr');
-                const td = document.createElement('td');
-                td.colSpan = 2;
-                td.style.color = '#ff4d4d';
-                td.style.fontWeight = '300';
-                td.style.fontSize = '12px';
-                td.style.textAlign = 'center';
-                td.style.paddingTop = '10px';
-                td.innerText = 'Na spoji neplatí doklady VDV';
-                tr.appendChild(td);
-                
-                const tbody = table.tagName === 'TBODY' ? table : table.querySelector('tbody');
-                if (tbody) tbody.appendChild(tr);
-                else table.appendChild(tr);
-            } else {
-                const warningMsg = document.createElement('div');
-                warningMsg.style.color = '#ff4d4d'; 
-                warningMsg.style.fontWeight = '300';
-                warningMsg.style.fontSize = '12px';
-                warningMsg.style.textAlign = 'center';
-                warningMsg.style.marginTop = '10px';
-                warningMsg.innerText = 'Na spoji neplatí doklady VDV';
-                tempDiv.appendChild(warningMsg);
-            }
+            if (table) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 2; td.style.color = '#ff4d4d'; td.style.fontWeight = '300'; td.style.fontSize = '12px'; td.style.textAlign = 'center'; td.style.paddingTop = '10px'; td.innerText = 'Na spoji neplatí doklady VDV'; tr.appendChild(td); const tbody = table.tagName === 'TBODY' ? table : table.querySelector('tbody'); if (tbody) tbody.appendChild(tr); else table.appendChild(tr); }
+            else { const warningMsg = document.createElement('div'); warningMsg.style.color = '#ff4d4d'; warningMsg.style.fontWeight = '300'; warningMsg.style.fontSize = '12px'; warningMsg.style.textAlign = 'center'; warningMsg.style.marginTop = '10px'; warningMsg.innerText = 'Na spoji neplatí doklady VDV'; tempDiv.appendChild(warningMsg); }
         }
-
         cleanHtml = tempDiv.innerHTML;
-
         if (window.innerWidth <= 768) {
-            const bar = document.getElementById('mobile-bottom-bar');
-            const barContent = document.getElementById('mobile-bar-content');
-            
-            const currentScroll = barContent.scrollTop;
-            barContent.innerHTML = cleanHtml;
-            barContent.scrollTop = currentScroll;
-            
-            bar.classList.remove('hidden');
-            bar.onclick = function(e) { 
-                if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
-                    if (cleanHtml.includes('openTimetable')) {
-                        openTimetable(v.id, v.delay); 
-                    }
-                } 
-            };
+            const bar = document.getElementById('mobile-bottom-bar'); const barContent = document.getElementById('mobile-bar-content');
+            const currentScroll = barContent.scrollTop; barContent.innerHTML = cleanHtml; barContent.scrollTop = currentScroll; bar.classList.remove('hidden');
+            bar.onclick = function(e) { if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) if (cleanHtml.includes('openTimetable')) openTimetable(v.id, v.delay); };
         } else {
-            if (currentPopup && currentPopup.isOpen()) {
-                currentPopup.setLngLat([v.lng, v.lat]).setHTML(cleanHtml);
-            } else {
-                if (currentPopup) currentPopup.remove();
-                currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(cleanHtml).addTo(map);
-            }
+            if (currentPopup && currentPopup.isOpen()) currentPopup.setLngLat([v.lng, v.lat]).setHTML(cleanHtml);
+            else { if (currentPopup) currentPopup.remove(); currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(cleanHtml).addTo(map); }
         }
     } catch(e) { console.error("Nelze načíst detail vozidla", e); }
 }
 
 function updateMapVehicles() {
-    const allFeatures = [
-        ...liveCache.vdv,
-        ...liveCache.jihlava,
-        ...liveCache.hb
-    ];
-    
-    if (map.getSource('vehicles')) {
-        map.getSource('vehicles').setData({ type: 'FeatureCollection', features: allFeatures });
-    }
-
+    const allFeatures = [ ...liveCache.vdv, ...liveCache.jihlava, ...liveCache.hb ];
+    if (map.getSource('vehicles')) map.getSource('vehicles').setData({ type: 'FeatureCollection', features: allFeatures });
     if (selectedVehicleId !== null) {
         const vToClick = allFeatures.find(item => String(item.properties.id) === String(selectedVehicleId));
         if (vToClick) {
             if (!initialLoadAutoClickDone) {
                 handleVehicleClick(vToClick.properties);
-                if (isTimetableOpen) {
-                    if (vToClick.properties.isHB) openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay);
-                    else if (!vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
-                }
+                if (isTimetableOpen) { if (vToClick.properties.isHB) openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay); else if (!vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay); }
                 initialLoadAutoClickDone = true;
-            } else {
-                handleVehicleClick(vToClick.properties);
-            }
+            } else handleVehicleClick(vToClick.properties);
         }
     }
 }
 
-// --- 6. ENGINE PRO ŽIVÁ VOZIDLA (Nezávislý a neblokující) ---
 function toggleRealtimeMode(forceState = null) {
-    isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode;
-    const btn = document.getElementById('rt-btn');
-    
+    isRealtimeMode = forceState !== null ? forceState : !isRealtimeMode; const btn = document.getElementById('rt-btn');
     if (isRealtimeMode) {
-        map.setMaxZoom(19);
-        if(btn) btn.classList.add('active');
-        highlightRoute(activeRouteGroups);
-        
-        clearInterval(rtInterval); 
-        fetchLiveVehicles();
-        rtInterval = setInterval(fetchLiveVehicles, 10000);
+        map.setMaxZoom(19); if(btn) btn.classList.add('active'); highlightRoute(activeRouteGroups);
+        clearInterval(rtInterval); fetchLiveVehicles(); rtInterval = setInterval(fetchLiveVehicles, 10000);
     } else {
-        map.setMaxZoom(15);
-        if (map.getZoom() > 15) map.setZoom(15);
-        if(btn) btn.classList.remove('active');
-        clearInterval(rtInterval);
-        
-        map.getSource('vehicles').setData({ type: 'FeatureCollection', features: [] });
-        map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
-        
-        document.getElementById('mobile-bottom-bar').classList.add('hidden');
-        if (currentPopup) currentPopup.remove();
-        
-        selectedVehicleId = null;
-        highlightRoute([]); 
+        map.setMaxZoom(15); if (map.getZoom() > 15) map.setZoom(15); if(btn) btn.classList.remove('active'); clearInterval(rtInterval);
+        map.getSource('vehicles').setData({ type: 'FeatureCollection', features: [] }); map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+        document.getElementById('mobile-bottom-bar').classList.add('hidden'); if (currentPopup) currentPopup.remove(); selectedVehicleId = null; highlightRoute([]); 
     }
     updateURL();
 }
@@ -1344,97 +563,100 @@ if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEvent
 
 function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
-    
     const timestamp = new Date().getTime();
-    const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=objectid>0&outFields=*&f=json&_t=' + timestamp)}`;
-    const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
-    const hbUrl = `https://hb-mhd-bridge-1.onrender.com/hb.geojson?t=${timestamp}`;
-
+    
     // ZDROJ: VDV (Kraj)
     if (!isFetching.vdv) {
         isFetching.vdv = true;
-        fetch(vdvUrl, { cache: 'no-store' })
+        fetch(`https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`, { cache: 'no-store' })
             .then(r => r.json())
             .then(vdvData => {
                 let features = [];
                 vdvData.forEach(v => {
-                    const lng = parseFloat(v.lng); const lat = parseFloat(v.lat);
+                    const lng = parseFloat(v.lng), lat = parseFloat(v.lat);
                     if (isNaN(lng) || isNaN(lat) || (lng < 1 && lat < 1)) return;
 
-                    const isTrain = v.traction === 'TRAIN';
-                    const vTextStr = String(v.text || '');
-                    const shortLine = getShortLine(vTextStr);
+                    const isTrain = v.traction === 'TRAIN'; const vTextStr = String(v.text || ''); const shortLine = getShortLine(vTextStr);
                     
                     if (activeRouteGroups.length > 0) {
                         const routeOfVehicle = isTrain ? vTextStr : shortLine;
                         if (!activeRouteGroups.includes(routeOfVehicle) && !(isTrain && activeRouteGroups.includes('000'))) return;
                     }
                     
-                    let d = parseInt(v.delay, 10); if (isNaN(d)) d = 0;
-                    let delayClass = d >= 10 ? 'alert' : (d > 2 ? 'warn' : 'ok');
-                    if (!isTrain && shortLine.length <= 2) delayClass = 'dim';
+                    let d = parseInt(v.delay, 10);
+                    if (isNaN(d) || v.delay === null || String(v.delay).toLowerCase().includes('bez')) d = 0;
+                    if (String(v.delay) === "-2147483648") d = -2147483648;
+
+                    const isUnknownDelay = (d === -2147483648);
+                    const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
+                    // ZMĚNA 2: Skrytí duchů - Neznámé zpoždění a N/A směr = zahodit!
+                    if (isUnknownDelay && hasNaDirection && !isTrain) return;
+
+                    // ZMĚNA 3: Detekce neintegrovaných spojů (Modrý okraj)
+                    const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
+
+                    let delayClass = 'ok';
+                    if (isUnknownDelay) delayClass = 'unknown'; // ZMĚNA 1: Šedá barva pro neznámé zpoždění
+                    else if (d >= 10) delayClass = 'alert';
+                    else if (d > 2) delayClass = 'warn';
+
+                    if (!isTrain && shortLine !== "??" && shortLine.length <= 2) delayClass = 'dim';
 
                     features.push({
-                        type: 'Feature',
-                        geometry: { type: 'Point', coordinates: [lng, lat] },
+                        type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] },
                         properties: {
                             id: String(v.id), delay: d, traction: v.traction, text: vTextStr, lng: lng, lat: lat,
-                            iconId: getVehicleIcon(delayClass, shortLine, isTrain, false), 
-                            finalStopName: v.finalStopName || "", shortLine: shortLine,
-                            isJihlava: false, isTrain: isTrain, isNonVDV: false
+                            iconId: getVehicleIcon(delayClass, shortLine, isTrain, isNonVDV), 
+                            finalStopName: v.finalStopName || "", shortLine: shortLine, isJihlava: false, isTrain: isTrain, isNonVDV: isNonVDV
                         }
                     });
                 });
-                liveCache.vdv = features;
-                updateMapVehicles();
-            })
-            .catch(e => console.warn("Chyba VDV:", e))
-            .finally(() => isFetching.vdv = false);
+                liveCache.vdv = features; updateMapVehicles();
+            }).catch(e => console.warn("Chyba VDV:", e)).finally(() => isFetching.vdv = false);
     }
 
     // ZDROJ: Jihlava
     if (!isFetching.jihlava) {
         isFetching.jihlava = true;
-        fetch(jihlavaUrl, { cache: 'no-store' })
+        fetch(`https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=objectid>0&outFields=*&f=json&_t=' + timestamp)}`, { cache: 'no-store' })
             .then(r => r.json())
             .then(jihData => {
                 let features = [];
                 if (jihData.features) {
                     jihData.features.forEach(f => {
                         const p = f.attributes || f.properties; if (!p) return;
-                        const lng = parseFloat(p.longitude); const lat = parseFloat(p.latitude);
+                        const lng = parseFloat(p.longitude), lat = parseFloat(p.latitude);
                         if (isNaN(lng) || isNaN(lat) || (lng < 1 && lat < 1)) return;
                         
                         const shortLine = String(p.linka).trim();
                         if (activeRouteGroups.length > 0 && !activeRouteGroups.includes(shortLine)) return;
                         
                         let delay = parseInt(p.delayinmins, 10); if (isNaN(delay)) delay = 0;
-                        let delayClass = delay >= 10 ? 'alert' : (delay > 2 ? 'warn' : 'ok');
+                        if (String(p.delayinmins) === "-2147483648") delay = -2147483648;
+                        
+                        let delayClass = 'ok';
+                        if (delay === -2147483648) delayClass = 'unknown';
+                        else if (delay >= 10) delayClass = 'alert';
+                        else if (delay > 2) delayClass = 'warn';
                         if (shortLine.length <= 2) delayClass = 'dim';
 
                         features.push({
-                            type: 'Feature',
-                            geometry: { type: 'Point', coordinates: [lng, lat] },
+                            type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] },
                             properties: {
-                                id: "J" + p.objectid, delay: delay, traction: p.typ === "trolejbus" ? "TROLLEYBUS" : "BUS",
-                                text: p.linka, lng: lng, lat: lat, iconId: getVehicleIcon(delayClass, shortLine, false, false),
-                                finalStopName: p.konecna || "", shortLine: shortLine, isJihlava: true, isTrain: false,
-                                isNonVDV: false, lastStop: p.posledni || ""
+                                id: "J" + p.objectid, delay: delay, traction: p.typ === "trolejbus" ? "TROLLEYBUS" : "BUS", text: p.linka, lng: lng, lat: lat,
+                                iconId: getVehicleIcon(delayClass, shortLine, false, false), finalStopName: p.konecna || "", shortLine: shortLine, isJihlava: true, isTrain: false, isNonVDV: false, lastStop: p.posledni || ""
                             }
                         });
                     });
                 }
-                liveCache.jihlava = features;
-                updateMapVehicles();
-            })
-            .catch(e => console.warn("Chyba Jihlava:", e))
-            .finally(() => isFetching.jihlava = false);
+                liveCache.jihlava = features; updateMapVehicles();
+            }).catch(e => console.warn("Chyba Jihlava:", e)).finally(() => isFetching.jihlava = false);
     }
 
     // ZDROJ: Havlíčkův Brod
     if (!isFetching.hb) {
         isFetching.hb = true;
-        fetch(hbUrl, { cache: 'no-store' })
+        fetch(`https://hb-mhd-bridge-1.onrender.com/hb.geojson?t=${timestamp}`, { cache: 'no-store' })
             .then(r => r.json())
             .then(hbData => {
                 let features = [];
@@ -1444,68 +666,38 @@ function fetchLiveVehicles() {
                         if (!p.lastStop || p.lastStop.trim() === "") return; 
                         if (activeRouteGroups.length > 0 && !activeRouteGroups.includes(p.shortLine) && !activeRouteGroups.includes(p.vdvLine)) return;
                         
-                        p.lng = f.geometry.coordinates[0];
-                        p.lat = f.geometry.coordinates[1];
-                        p.isHB = true;
+                        p.lng = f.geometry.coordinates[0]; p.lat = f.geometry.coordinates[1]; p.isHB = true;
                         
-                        // Zde je isNonVDV nastaveno na true -> generuje modrý okraj
-                        p.isNonVDV = true;
-                        p.iconId = getVehicleIcon(p.delayClass || 'ok', p.shortLine, false, true);
+                        let d = parseInt(p.delay, 10); if(isNaN(d)) d = 0;
+                        if (String(p.delay) === "-2147483648") d = -2147483648;
+                        let delayClass = 'ok';
+                        if (d === -2147483648) delayClass = 'unknown';
+                        else if (d >= 10) delayClass = 'alert';
+                        else if (d > 2) delayClass = 'warn';
+
+                        // ZMĚNA 4: Havlíčkův Brod má 1-2 ciferné linky -> Tmavé pozadí + modrý okraj
+                        if (p.shortLine && p.shortLine.length <= 2) delayClass = 'dim'; 
+                        p.isNonVDV = true; 
                         
-                        features.push({
-                            type: 'Feature',
-                            geometry: f.geometry,
-                            properties: p
-                        });
+                        p.iconId = getVehicleIcon(delayClass, p.shortLine, false, true);
+                        features.push({ type: 'Feature', geometry: f.geometry, properties: p });
                     });
                 }
-                liveCache.hb = features;
-                updateMapVehicles();
-            })
-            .catch(e => console.warn("Havlíčkův Brod čeká na probuzení Render.com serveru..."))
-            .finally(() => isFetching.hb = false);
+                liveCache.hb = features; updateMapVehicles();
+            }).catch(e => console.warn("HB čeká na proxy...")).finally(() => isFetching.hb = false);
     }
 }
 
 const locateBtn = document.getElementById('locate-btn');
 if(locateBtn) locateBtn.addEventListener('click', () => {
-    if ("geolocation" in navigator) {
-        navigator.geolocation.getCurrentPosition(position => {
-            map.flyTo({ center: [position.coords.longitude, position.coords.latitude], zoom: 14 });
-        });
-    }
+    if ("geolocation" in navigator) navigator.geolocation.getCurrentPosition(position => { map.flyTo({ center: [position.coords.longitude, position.coords.latitude], zoom: 14 }); });
 });
 
-const compassBtn = document.createElement('div');
-compassBtn.id = 'compass-btn';
+const compassBtn = document.createElement('div'); compassBtn.id = 'compass-btn';
 compassBtn.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>`;
-compassBtn.style.cssText = `
-    position: absolute; right: 20px; bottom: 138px; z-index: 1000;
-    background: rgba(20, 20, 20, 0.85); backdrop-filter: blur(8px);
-    border: 1px solid rgba(255,255,255,0.15); border-radius: 50%;
-    width: 44px; height: 44px; cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    display: none; align-items: center; justify-content: center;
-    transition: opacity 0.2s ease;
-`;
+compassBtn.style.cssText = `position: absolute; right: 20px; bottom: 138px; z-index: 1000; background: rgba(20, 20, 20, 0.85); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.15); border-radius: 50%; width: 44px; height: 44px; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; transition: opacity 0.2s ease;`;
 document.body.appendChild(compassBtn);
 
-compassBtn.addEventListener('click', () => {
-    // Srovná kompas na sever a zruší naklopení (pitch)
-    map.resetNorthPitch({ duration: 500 });
-});
-
-function updateCompass() {
-    const bearing = map.getBearing();
-    const pitch = map.getPitch();
-    // Kompas zmizí pouze tehdy, když není ani otočeno, ani naklopeno
-    if (Math.abs(bearing) < 0.5 && pitch < 1) {
-        compassBtn.style.display = 'none';
-    } else {
-        compassBtn.style.display = 'flex';
-        compassBtn.querySelector('svg').style.transform = `rotate(${-bearing}deg)`;
-    }
-}
-map.on('rotate', updateCompass);
-map.on('pitch', updateCompass); // Přidáno sledování naklopení (pitch)
-map.on('move', updateCompass);
+compassBtn.addEventListener('click', () => { map.resetNorthPitch({ duration: 500 }); });
+function updateCompass() { const bearing = map.getBearing(), pitch = map.getPitch(); if (Math.abs(bearing) < 0.5 && pitch < 1) compassBtn.style.display = 'none'; else { compassBtn.style.display = 'flex'; compassBtn.querySelector('svg').style.transform = `rotate(${-bearing}deg)`; } }
+map.on('rotate', updateCompass); map.on('pitch', updateCompass); map.on('move', updateCompass);
