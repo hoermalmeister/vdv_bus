@@ -494,7 +494,7 @@ map.on('load', async () => {
                     const latIdx = headers.indexOf('stop_lat');
                     const lonIdx = headers.indexOf('stop_lon');
                     const nameIdx = headers.indexOf('stop_name');
-                    const zoneIdx = headers.indexOf('zone_id'); // Vyhledání sloupce se zónou
+                    const zoneIdx = headers.indexOf('zone_id'); 
 
                     if (latIdx > -1 && lonIdx > -1 && nameIdx > -1) {
                         const vdvStopsGeoJson = { type: 'FeatureCollection', features: [] };
@@ -509,7 +509,6 @@ map.on('load', async () => {
                             const lon = parseFloat(lonStr);
                             let name = cols[nameIdx] || "";
                             
-                            // Vytažení a zformátování zóny, pokud existuje
                             let zoneStr = zoneIdx > -1 ? (cols[zoneIdx] || "").trim().replace(/^"|"$/g, '') : "";
                             let displayName = name;
                             if (zoneStr) {
@@ -537,7 +536,6 @@ map.on('load', async () => {
 
                         const visibility = activeRouteGroups.length === 0 ? 'visible' : 'none';
 
-                        // Vizuální vylepšení zastávek (Bílé jádro, fialový okraj)
                         map.addLayer({
                             id: 'vdv-stops-layer',
                             type: 'circle',
@@ -562,7 +560,7 @@ map.on('load', async () => {
                                 'text-field': ['get', 'name'],
                                 'text-size': 12,
                                 'text-anchor': 'bottom',
-                                'text-offset': [0, -0.8] // Mírně zvednuto kvůli větší ikoně a dvěma řádkům
+                                'text-offset': [0, -0.8]
                             },
                             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
                         });
@@ -678,7 +676,7 @@ map.on('mouseleave', 'lines-layer', () => map.getCanvas().style.cursor = '');
 map.on('mouseenter', 'badges-layer', () => { if(!isRealtimeMode) map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'badges-layer', () => map.getCanvas().style.cursor = '');
 
-// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE PRO VDV) ---
+// --- 5. JÍZDNÍ ŘÁDY A SPOJE (S CACHE PRO VDV A HB) ---
 let cachedVehicleId = null;
 let cachedInfoRaw = null;
 let cachedTimetableRaw = null;
@@ -760,6 +758,80 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     } catch(e) { modalContent.innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
+window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
+    const modalContent = document.getElementById('timetable-modal-content');
+    const modal = document.getElementById('timetable-modal');
+
+    if (modal.classList.contains('hidden')) {
+        modalContent.innerHTML = "<div class='has-text-centered'>Načítám jízdní řád...</div>";
+        modal.classList.remove('hidden');
+    }
+    isTimetableOpen = true;
+    updateURL();
+
+    try {
+        const url = `https://hoermalmeister.github.io/hb-mhd-bridge/hb-timetables/${vdvLine}_${runNumber}.json`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Jízdní řád nenalezen");
+        const stops = await res.json();
+
+        // Hlavička se zpožděním (stejný design jako u VDV)
+        let delayHtml = "";
+        if (delayInMinutes !== undefined && delayInMinutes !== null) {
+            let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
+            let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Bez zpoždění');
+            delayHtml = `<div class="level is-mobile" style="margin-bottom: 10px;">
+                            <div class="level-left"></div>
+                            <div class="level-right">
+                                <div class="level-item">
+                                    <span style="margin-left: 15px;">Zpoždění: <b style="color:${delayClass}">${delayText}</b></span>
+                                </div>
+                            </div>
+                         </div>`;
+        }
+
+        let tableHtml = `${delayHtml}
+                         <table class="table is-narrow is-fullwidth is-striped" style="font-size: 14px;">
+                            <thead><tr><th>Zastávka</th><th class="has-text-centered">Příjezd</th><th class="has-text-centered">Odjezd</th></tr></thead>
+                            <tbody>`;
+
+        stops.forEach(s => {
+            let depHtml = s.dep;
+            let arrHtml = s.arr;
+
+            // Dynamický přepočet času s přeškrtnutím
+            if (delayInMinutes !== 0 && delayInMinutes !== null && delayInMinutes !== undefined) {
+                const applyDelay = (timeStr) => {
+                    if (!timeStr || timeStr.trim() === "") return "";
+                    const parts = timeStr.split(':');
+                    if(parts.length !== 2) return timeStr;
+                    let totalMin = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + delayInMinutes;
+                    if (totalMin < 0) totalMin += 24 * 60;
+                    let newH = Math.floor(totalMin / 60) % 24;
+                    let newM = totalMin % 60;
+                    let colorClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
+                    return `<s style="color:#666; font-size: 11px; margin-right: 4px;">${timeStr}</s><span style="color:${colorClass}">${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}</span>`;
+                };
+                depHtml = applyDelay(s.dep);
+                arrHtml = applyDelay(s.arr);
+            }
+
+            tableHtml += `<tr>
+                <td style="white-space: nowrap;">${s.name}</td>
+                <td class="has-text-centered">${arrHtml}</td>
+                <td class="has-text-centered">${depHtml}</td>
+            </tr>`;
+        });
+        
+        tableHtml += `</tbody></table>`;
+        modalContent.innerHTML = tableHtml;
+
+    } catch (e) {
+        modalContent.innerHTML = "<div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div>";
+    }
+};
+
+
 window.closeTimetable = function() { 
     document.getElementById('timetable-modal').classList.add('hidden'); 
     isTimetableOpen = false;
@@ -773,7 +845,79 @@ async function handleVehicleClick(v) {
     updateURL();
 
     const isJihlava = v.isJihlava === true || v.isJihlava === 'true';
+    const isHB = v.isHB === true || v.isHB === 'true';
 
+    // === HAVLÍČKŮV BROD DETAIL ===
+    if (isHB) {
+        const timetableUrl = `https://hoermalmeister.github.io/hb-mhd-bridge/hb-timetables/${v.vdvLine}_${v.runNumber}.json`;
+        
+        try {
+            // Vykreslení trasy pomocí souřadnic ze statického JSONu
+            const ttRes = await fetch(timetableUrl);
+            if (ttRes.ok) {
+                const stops = await ttRes.json();
+                const routeCoords = stops.filter(s => s.lat && s.lon).map(s => [s.lon, s.lat]);
+                if (routeCoords.length > 1) {
+                    map.getSource('trip-route').setData({
+                        type: 'Feature',
+                        geometry: { type: 'LineString', coordinates: routeCoords }
+                    });
+                } else {
+                    map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+                }
+            } else {
+                map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+            }
+        } catch (e) {
+            map.getSource('trip-route').setData({ type: 'FeatureCollection', features: [] });
+        }
+
+        // Tvorba HTML tabulky ve formátu VDV
+        let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
+        let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
+        
+        let html = `
+            <div>
+                <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
+                    <tbody>
+                        <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.text}</td></tr>
+                        <tr><th style="white-space: nowrap;">Spoj</th><td style="font-weight: normal;">${v.runNumber}</td></tr>
+                        <tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr>
+                        <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
+                        <tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr>
+                    </tbody>
+                </table>
+                <div style="text-align: center; margin-top: 10px;">
+                    <button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})">Jízdní řád</button>
+                </div>
+                <div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Havlíčkův Brod</div>
+            </div>
+        `;
+
+        if (window.innerWidth <= 768) {
+            const bar = document.getElementById('mobile-bottom-bar');
+            document.getElementById('mobile-bar-content').innerHTML = html;
+            bar.classList.remove('hidden');
+            bar.onclick = function(e) { 
+                if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) {
+                    if (html.includes('openHbTimetable')) {
+                        openHbTimetable(v.vdvLine, v.runNumber, v.delay); 
+                    }
+                } 
+            };
+        } else {
+            if (currentPopup && currentPopup.isOpen()) {
+                currentPopup.setLngLat([v.lng, v.lat]).setHTML(html);
+            } else {
+                if (currentPopup) currentPopup.remove();
+                currentPopup = new maplibregl.Popup({ closeOnClick: false }).setLngLat([v.lng, v.lat]).setHTML(html).addTo(map);
+            }
+        }
+        return;
+    }
+
+
+    // === Jihlava detail ===
     if (isJihlava) {
         let multiLineCoords = [];
         if (geojsonData) {
@@ -831,6 +975,7 @@ async function handleVehicleClick(v) {
         return;
     }
 
+    // === Kraj detail ===
     const isTrain = v.traction === 'TRAIN';
     const vTextStr = String(v.text || '');
     const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
@@ -1144,14 +1289,17 @@ async function fetchLiveVehicles() {
         
         const jihlavaUrl = `https://corsproxy.io/?${encodeURIComponent('https://gis.jihlava-city.cz/server1/rest/services/verejnost/Ji_MHD_aktualni/MapServer/50/query?where=objectid>0&outFields=*&f=json&_t=' + timestamp)}`;
         const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
+        const hbUrl = `https://hb-mhd-bridge-1.onrender.com/hb.geojson?t=${timestamp}`; // Náš nový most
         
-        const [vdvRes, jihRes] = await Promise.allSettled([
+        const [vdvRes, jihRes, hbRes] = await Promise.allSettled([
             fetch(vdvUrl, { cache: 'no-store' }).then(r => r.json()),
-            fetch(jihlavaUrl, { cache: 'no-store' }).then(r => r.json())
+            fetch(jihlavaUrl, { cache: 'no-store' }).then(r => r.json()),
+            fetch(hbUrl, { cache: 'no-store' }).then(r => r.json())
         ]);
         
         let allVehicles = [];
         
+        // Zpracování dat Kraje
         if (vdvRes.status === 'fulfilled') {
             const vdvData = vdvRes.value;
             vdvData.forEach(v => {
@@ -1206,6 +1354,7 @@ async function fetchLiveVehicles() {
             });
         }
         
+        // Zpracování dat Jihlavy
         if (jihRes.status === 'fulfilled') {
             const jihData = jihRes.value;
             if (jihData.features) {
@@ -1260,19 +1409,58 @@ async function fetchLiveVehicles() {
             }
         }
 
+        // Zpracování dat Havlíčkova Brodu
+        if (hbRes.status === 'fulfilled') {
+            const hbData = hbRes.value;
+            if (hbData && hbData.features) {
+                hbData.features.forEach(f => {
+                    const p = f.properties;
+                    // Přeskočíme spoje bez zadané poslední zastávky
+                    if (!p.lastStop || p.lastStop.trim() === "") return;
+
+                    if (activeRouteGroups.length > 0 && !activeRouteGroups.includes(p.shortLine)) return;
+                    
+                    // Nastavíme vlastnosti ikony pro mapu
+                    p.lng = f.geometry.coordinates[0];
+                    p.lat = f.geometry.coordinates[1];
+                    p.isHB = true;
+                    p.iconId = getVehicleIcon(p.delayClass || 'ok', p.shortLine, false, false);
+                    
+                    allVehicles.push({
+                        type: 'Feature',
+                        geometry: f.geometry,
+                        properties: p
+                    });
+                });
+            }
+        }
+
         const geojson = { type: 'FeatureCollection', features: allVehicles };
         if (map.getSource('vehicles')) map.getSource('vehicles').setData(geojson);
 
+        // Udržení aktivního okna při aktualizaci pozice
         if (selectedVehicleId !== null) {
             const vToClick = allVehicles.find(item => String(item.properties.id) === String(selectedVehicleId));
             if (vToClick) {
                 if (!initialLoadAutoClickDone) {
                     handleVehicleClick(vToClick.properties);
-                    if (isTimetableOpen && !vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
+                    if (isTimetableOpen) {
+                        if (vToClick.properties.isHB) {
+                            openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay);
+                        } else if (!vToClick.properties.isJihlava) {
+                            openTimetable(vToClick.properties.id, vToClick.properties.delay);
+                        }
+                    }
                     initialLoadAutoClickDone = true;
                 } else {
                     handleVehicleClick(vToClick.properties);
-                    if (isTimetableOpen && !vToClick.properties.isJihlava) openTimetable(vToClick.properties.id, vToClick.properties.delay);
+                    if (isTimetableOpen) {
+                        if (vToClick.properties.isHB) {
+                            openHbTimetable(vToClick.properties.vdvLine, vToClick.properties.runNumber, vToClick.properties.delay);
+                        } else if (!vToClick.properties.isJihlava) {
+                            openTimetable(vToClick.properties.id, vToClick.properties.delay);
+                        }
+                    }
                 }
             }
         }
