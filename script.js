@@ -195,7 +195,6 @@ function getBadgeIcon(group, color) {
     return id;
 }
 
-// Základní ikonka pro vozidla (zůstává nezměněná kruhová)
 function getVehicleIcon(delayClass, label, isTrain, isNonVDV = false) {
     const id = `v-${delayClass}-${label}-${isTrain ? 't' : 'b'}-${isNonVDV ? 'nvdv' : 'vdv'}`;
     if (map.hasImage(id)) return id;
@@ -482,7 +481,6 @@ map.on('load', async () => {
             paint: { 'text-color': '#fff', 'text-halo-color': '#111', 'text-halo-width': 2 }
         });
 
-        // --- PŘIDÁNÍ EXTERNÍCH GTFS ZASTÁVEK (VDV STOPS) VČETNĚ ZÓN ---
         try {
             const stopsUrl = 'https://hoermalmeister.github.io/gtfs-rehost/vdv/stops.txt?_t=' + new Date().getTime();
             const stopsRes = await fetch(stopsUrl, { cache: 'no-store' });
@@ -762,7 +760,7 @@ window.openTimetable = async function(vehicleId, delayInMinutes) {
     } catch(e) { modalContent.innerHTML = "<div class='has-text-centered'>Chyba při načítání jízdního řádu.</div>"; }
 };
 
-// Zobrazení jízdního řádu HB
+// Zobrazení jízdního řádu HB s IDENTICKÝM Bulma formátem
 window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
     const modalContent = document.getElementById('timetable-modal-content');
     const modal = document.getElementById('timetable-modal');
@@ -780,29 +778,47 @@ window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
         if (!res.ok) throw new Error("Jízdní řád nenalezen");
         const stops = await res.json();
 
-        let delayHtml = "";
-        if (delayInMinutes !== undefined && delayInMinutes !== null) {
-            let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
-            let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Bez zpoždění');
-            delayHtml = `<div class="level is-mobile" style="margin-bottom: 10px;">
-                            <div class="level-left"></div>
-                            <div class="level-right">
-                                <div class="level-item">
-                                    <span style="margin-left: 15px;">Zpoždění: <b style="color:${delayClass}">${delayText}</b></span>
-                                </div>
-                            </div>
-                         </div>`;
-        }
+        let delayClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
+        let delayText = delayInMinutes > 0 ? `+${delayInMinutes} min` : (delayInMinutes < 0 ? `${Math.abs(delayInMinutes)} min náskok` : 'Bez zpoždění');
+        
+        let delaySpanHtml = (delayInMinutes !== null && delayInMinutes !== undefined)
+            ? `<span style="margin-left: 15px;">Zpoždění: <b style="color:${delayClass}">${delayText}</b></span>`
+            : "";
 
-        // Zpět na mapu tlačítko
-        let backButtonHtml = `<div style="margin-bottom: 15px; text-align: left;">
-            <button class="button is-small is-light" onclick="closeTimetable()">⬅ Zpět na mapu</button>
-        </div>`;
+        // Formát modálního okna převzatý 1:1 z VDV z tvého kódu
+        let html = `
+        <div class="field">
+            <nav class="level is-mobile mb-2">
+                <div class="level-left">
+                    <div class="level-item">
+                        <button class="button is-small" onclick="closeTimetable()">
+                            <span class="icon is-small">
+                                <i class="fas fa-arrow-left"></i>
+                            </span>
+                            <span>Zpět</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="level-right">
+                    <div class="level-item" style="margin-right: 15px;">
+                        <span style="font-weight:bold;margin-right: 10px;">Linkospoj:</span>
+                        <span id="currentLineRouteLabel">${vdvLine} / ${runNumber}</span>
+                        <span id="nextLineRouteLabel" class="is-hidden">-- / --</span>
+                        ${delaySpanHtml}
+                    </div>
+                </div>
+            </nav>
 
-        let tableHtml = `${backButtonHtml}${delayHtml}
-                         <table class="table is-narrow is-fullwidth is-striped" style="font-size: 14px;">
-                            <thead><tr><th>Zastávka</th><th class="has-text-centered">Příjezd</th><th class="has-text-centered">Odjezd</th></tr></thead>
-                            <tbody>`;
+            <div class="field" id="timetableCurrentContainer">
+                <table class="table is-striped is-fullwidth">
+                    <thead>
+                        <tr>
+                            <th style="white-space: nowrap;">Zastávka</th>
+                            <th class="has-text-centered" style="width:100px">Příjezd</th>
+                            <th class="has-text-centered" style="width:100px">Odjezd</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
 
         stops.forEach(s => {
             let depHtml = s.dep;
@@ -817,28 +833,37 @@ window.openHbTimetable = async function(vdvLine, runNumber, delayInMinutes) {
                     if (totalMin < 0) totalMin += 24 * 60;
                     let newH = Math.floor(totalMin / 60) % 24;
                     let newM = totalMin % 60;
-                    let colorClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
-                    return `<s style="color:#666; font-size: 11px; margin-right: 4px;">${timeStr}</s><span style="color:${colorClass}">${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}</span>`;
+                    let cClass = delayInMinutes >= 10 ? '#e74c3c' : (delayInMinutes > 2 ? '#f39c12' : '#58d68d');
+                    return `<s style="color:#666; font-size: 11px; margin-right: 4px;">${timeStr}</s><span style="color:${cClass}">${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}</span>`;
                 };
                 depHtml = applyDelay(s.dep);
                 arrHtml = applyDelay(s.arr);
             }
 
-            tableHtml += `<tr>
+            html += `<tr>
                 <td style="white-space: nowrap;">${s.name}</td>
                 <td class="has-text-centered">${arrHtml}</td>
                 <td class="has-text-centered">${depHtml}</td>
             </tr>`;
         });
         
-        tableHtml += `</tbody></table>`;
-        modalContent.innerHTML = tableHtml;
+        html += `</tbody></table></div></div>`;
+        modalContent.innerHTML = html;
 
     } catch (e) {
-        let backButtonHtml = `<div style="margin-bottom: 15px; text-align: left;">
-            <button class="button is-small is-light" onclick="closeTimetable()">⬅ Zpět na mapu</button>
+        modalContent.innerHTML = `
+        <div class="field">
+            <nav class="level is-mobile mb-2">
+                <div class="level-left">
+                    <div class="level-item">
+                        <button class="button is-small" onclick="closeTimetable()">
+                            <span class="icon is-small"><i class="fas fa-arrow-left"></i></span><span>Zpět</span>
+                        </button>
+                    </div>
+                </div>
+            </nav>
+            <div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div>
         </div>`;
-        modalContent.innerHTML = `${backButtonHtml}<div class='has-text-centered'>Jízdní řád pro tento spoj zatím není k dispozici.</div>`;
     }
 };
 
@@ -884,22 +909,26 @@ async function handleVehicleClick(v) {
         let delayClass = v.delay >= 10 ? '#e74c3c' : (v.delay > 2 ? '#f39c12' : '#58d68d');
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
         
-        // Zde se v tabulce vykreslí plné vdvLine (605xxx) místo krátkého čísla
+        // Zcela identický kód popup okna jako u VDV (vč. bulma classes a font-awesome ikony)
         let html = `
-            <div>
-                <table class="table is-narrow is-fullwidth" style="margin-bottom: 0;">
+            <div class="table-container">
+                <table class="table is-striped is-fullwidth" style="margin-bottom: 0;">
                     <tbody>
                         <tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.vdvLine}</td></tr>
-                        <tr><th style="white-space: nowrap;">Spoj</th><td style="font-weight: normal;">${v.runNumber}</td></tr>
+                        <tr><th style="white-space: nowrap;">Spoj</th><td>${v.runNumber}</td></tr>
                         <tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr>
                         <tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr>
                         <tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr>
                     </tbody>
                 </table>
-                <div style="text-align: center; margin-top: 10px;">
-                    <button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})">Jízdní řád</button>
+                <div style="margin-top: 10px;">
+                    <button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})">
+                        <span class="icon is-small">
+                            <i class="fas fa-table"></i>
+                        </span>
+                        <span>Jízdní řád</span>
+                    </button>
                 </div>
-                <div style="color: #999; font-weight: 300; font-size: 12px; text-align: center; margin-top: 10px;">Spoj MHD Havlíčkův Brod</div>
             </div>
         `;
 
@@ -1255,7 +1284,6 @@ async function handleVehicleClick(v) {
     } catch(e) { console.error("Nelze načíst detail vozidla", e); }
 }
 
-// Sloučení stažených dat do mapy
 function updateMapVehicles() {
     const allFeatures = [
         ...liveCache.vdv,
@@ -1278,7 +1306,6 @@ function updateMapVehicles() {
                 }
                 initialLoadAutoClickDone = true;
             } else {
-                // Překreslí jen okno, zachová trasu
                 handleVehicleClick(vToClick.properties);
             }
         }
@@ -1318,7 +1345,7 @@ function toggleRealtimeMode(forceState = null) {
 
 if(document.getElementById('rt-btn')) document.getElementById('rt-btn').addEventListener('click', () => toggleRealtimeMode());
 
-// Každé město má nyní svůj vlastní zámek. Žádné město už nebude blokovat to další.
+// Nezávislé volání 3 zdrojů - rychlé město nečeká na spící proxy
 function fetchLiveVehicles() {
     if (!isRealtimeMode) return;
     
@@ -1327,7 +1354,7 @@ function fetchLiveVehicles() {
     const vdvUrl = `https://corsproxy.io/?${encodeURIComponent('https://mapavdv.kr-vysocina.cz/Ajax/GetPoints?t=' + timestamp)}`;
     const hbUrl = `https://hb-mhd-bridge-1.onrender.com/hb.geojson?t=${timestamp}`;
 
-    // 1. ZDROJ: VDV (Kraj Vysočina)
+    // 1. ZDROJ: VDV (Kraj)
     if (!isFetching.vdv) {
         isFetching.vdv = true;
         fetch(vdvUrl, { cache: 'no-store' })
@@ -1425,8 +1452,7 @@ function fetchLiveVehicles() {
                         p.lat = f.geometry.coordinates[1];
                         p.isHB = true;
                         
-                        // Zde do ikonky na mapě posíláme krátké číslo (p.shortLine), 
-                        // detailní tabulka v popupu (html níže) si bere p.vdvLine
+                        // Zde je ikona na mapě krátká:
                         p.iconId = getVehicleIcon(p.delayClass || 'ok', p.shortLine, false, false);
                         
                         features.push({
@@ -1439,7 +1465,7 @@ function fetchLiveVehicles() {
                 liveCache.hb = features;
                 updateMapVehicles();
             })
-            .catch(e => console.warn("Havlíčkův Brod čeká na probuzení Render.com serveru..."))
+            .catch(e => console.warn("Havlíčkův Brod proxy server se probouzí..."))
             .finally(() => isFetching.hb = false);
     }
 }
