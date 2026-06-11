@@ -411,7 +411,7 @@ async function handleVehicleClick(v) {
         let delayText = v.delay > 0 ? `+${v.delay} min` : (v.delay < 0 ? `${Math.abs(v.delay)} min náskok` : 'Bez zpoždění');
         if (v.delay === -2147483648) { delayClass = '#7f8c8d'; delayText = 'Neznámé'; }
 
-        let html = `<div class="table-container"><table class="table is-striped is-fullwidth" style="margin-bottom: 0;"><tbody><tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.vdvLine}</td></tr><tr><th style="white-space: nowrap;">Spoj</th><td>${v.runNumber}</td></tr><tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr><tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr><tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr></tbody></table><button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})" style="margin-top: 5px;"><span class="icon is-small"><i class="fas fa-table"></i></span><span>Jízdní řád</span></button></div>`;
+        let html = `<div class="table-container"><table class="table is-striped is-fullwidth" style="margin-bottom: 0;"><tbody><tr><th style="white-space: nowrap;">Linka</th><td style="font-weight: normal;">${v.vdvLine}</td></tr><tr><th style="white-space: nowrap;">Spoj</th><td>${v.runNumber}</td></tr><tr><th style="white-space: nowrap;">Směr</th><td style="font-weight: normal;">${v.finalStopName}</td></tr><tr><th style="white-space: nowrap;">Zpoždění</th><td><b style="color:${delayClass}">${delayText}</b></td></tr><tr><th style="white-space: nowrap;">Zastávka</th><td>${v.lastStop}</td></tr></tbody></table><div style="margin-top: 10px;"><button class="button is-small is-info is-outlined" onclick="openHbTimetable('${v.vdvLine}', '${v.runNumber}', ${v.delay})"><span class="icon is-small"><i class="fas fa-table"></i></span><span>Jízdní řád</span></button></div></div>`;
         if (window.innerWidth <= 768) {
             const bar = document.getElementById('mobile-bottom-bar'); document.getElementById('mobile-bar-content').innerHTML = html; bar.classList.remove('hidden');
             bar.onclick = function(e) { if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'I' && !e.target.closest('button')) if (html.includes('openHbTimetable')) openHbTimetable(v.vdvLine, v.runNumber, v.delay); };
@@ -448,7 +448,10 @@ async function handleVehicleClick(v) {
     }
 
     const isTrain = v.traction === 'TRAIN'; const vTextStr = String(v.text || ''); const routeToHighlight = isTrain ? vTextStr : getShortLine(vTextStr);
-    const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
+    
+    // ZMĚNA 3: Filtr pro neintegrované spoje aplikujeme i v detailu
+    const isUnknownTraction = String(v.traction).toLowerCase() === 'unknown' && /^\d{3}$/.test(vTextStr);
+    const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix)) || isUnknownTraction;
 
     try {
         let infoRaw, timetableRaw;
@@ -589,14 +592,17 @@ function fetchLiveVehicles() {
 
                     const isUnknownDelay = (d === -2147483648);
                     const hasNaDirection = v.finalStopName && /n\/a/i.test(v.finalStopName);
-                    // ZMĚNA 2: Skrytí duchů - Neznámé zpoždění a N/A směr = zahodit!
+                    
+                    // ZMĚNA 2: Skrytí duchů (Neznámé zpoždění a N/A směr)
                     if (isUnknownDelay && hasNaDirection && !isTrain) return;
 
-                    // ZMĚNA 3: Detekce neintegrovaných spojů (Modrý okraj)
-                    const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix));
+                    // ZMĚNA 3: Filtr neintegrovaných spojů (Trakce UNKNOWN a tříciferná linka)
+                    const isUnknownTraction = String(v.traction).toLowerCase() === 'unknown' && /^\d{3}$/.test(vTextStr);
+                    const isNonVDV = vTextStr.startsWith('620') || vTextStr.startsWith('35500') || vTextStr.startsWith('84500') || ['841125', '841121', '849124', '841334'].some(prefix => vTextStr.startsWith(prefix)) || isUnknownTraction;
 
+                    // ZMĚNA 1: Barvy zpoždění s návratem šedé "unknown" barvy
                     let delayClass = 'ok';
-                    if (isUnknownDelay) delayClass = 'unknown'; // ZMĚNA 1: Šedá barva pro neznámé zpoždění
+                    if (isUnknownDelay) delayClass = 'unknown'; 
                     else if (d >= 10) delayClass = 'alert';
                     else if (d > 2) delayClass = 'warn';
 
@@ -675,7 +681,7 @@ function fetchLiveVehicles() {
                         else if (d >= 10) delayClass = 'alert';
                         else if (d > 2) delayClass = 'warn';
 
-                        // ZMĚNA 4: Havlíčkův Brod má 1-2 ciferné linky -> Tmavé pozadí + modrý okraj
+                        // ZMĚNA 4: Havlíčkův Brod má vždy 1-2 ciferné linky -> Tmavé pozadí + modrý okraj
                         if (p.shortLine && p.shortLine.length <= 2) delayClass = 'dim'; 
                         p.isNonVDV = true; 
                         
